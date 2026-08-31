@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.model.ConnectionState
 import com.example.model.PdrConfig
 import com.example.model.Position
+import com.example.model.ServerMapConfig
 import com.example.model.TrackerState
 import com.example.model.UserPosition
 import com.example.sensor.IndoorTracker
@@ -25,10 +26,13 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * ViewModel для управления бизнес-логикой приложения клинера:
  * - Управление PDR-трекером (IndoorTracker)
+ * - Преобразование относительных метров PDR в координаты карты сервера [0..800, 0..600]
  * - Управление Socket.io подключением и отправкой координат каждые 2 сек
  * - Предоставление реактивного состояния для Jetpack Compose UI
  */
@@ -44,14 +48,30 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
 
     private var periodicSendJob: Job? = null
     private var durationTimerJob: Job? = null
+    private var simulationJob: Job? = null
 
     // Таймер текущей сессии уборки в секундах
     private val _sessionDurationSeconds = MutableStateFlow<Long>(0L)
     val sessionDurationSeconds: StateFlow<Long> = _sessionDurationSeconds.asStateFlow()
 
+    // Флаг активной симуляции
+    private val _isSimulating = MutableStateFlow(false)
+    val isSimulating: StateFlow<Boolean> = _isSimulating.asStateFlow()
+
     // Настройки PDR
     private val _pdrConfig = MutableStateFlow(PdrConfig())
     val pdrConfig: StateFlow<PdrConfig> = _pdrConfig.asStateFlow()
+
+    // Настройки отображения на карте сервера (800x600 px)
+    private val _serverMapConfig = MutableStateFlow(
+        ServerMapConfig(
+            originX = 400.0,
+            originY = 300.0,
+            pixelsPerMeter = 20.0,
+            cleanerName = socketService.cleanerName.value.ifEmpty { "cleaner-1" }
+        )
+    )
+    val serverMapConfig: StateFlow<ServerMapConfig> = _serverMapConfig.asStateFlow()
 
     // Логи для панели отладки
     private val _activityLogs = MutableStateFlow<List<String>>(listOf("Система инициализирована. Готов к уборке."))
@@ -62,15 +82,21 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         indoorTracker.trackerState,
         connectionState,
         socketService.packetsSentCount,
-        socketService.lastSentTimestamp
-    ) { trackerState, connState, packetsCount, lastSent ->
+        _serverMapConfig,
+        _isSimulating
+    ) { trackerState, connState, packetsCount, mapCfg, simulating ->
+        val (sx, sy) = calculateServerCoords(trackerState.currentPosition.x, trackerState.currentPosition.y, mapCfg)
         TrackerUiState(
             trackerState = trackerState.copy(
                 packetsSentCount = packetsCount,
-                lastSentTimestamp = lastSent
+                lastSentTimestamp = socketService.lastSentTimestamp.value
             ),
             connectionState = connState,
-            userId = userId
+            userId = userId,
+            serverX = sx,
+            serverY = sy,
+            cleanerName = mapCfg.cleanerName,
+            isSimulating = simulating
         )
     }.stateIn(
         scope = viewModelScope,
@@ -82,6 +108,20 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         // Подключаемся к сокет-серверу при запуске
         socketService.connect()
         addLog("Подключение к серверу ${SocketService.SERVER_URL}...")
+    }
+
+    /**
+     * Конвертация относительных метров PDR (x, y) в абсолютные пиксели карты сервера [0..800, 0..600].
+     */
+    fun calculateServerCoordinates(pdrX: Double, pdrY: Double): Pair<Double, Double> {
+        return calculateServerCoords(pdrX, pdrY, _serverMapConfig.value)
+    }
+
+    private fun calculateServerCoords(pdrX: Double, pdrY: Double, cfg: ServerMapConfig): Pair<Double, Double> {
+        val sx = (cfg.originX + pdrX * cfg.pixelsPerMeter).coerceIn(10.0, 790.0)
+        // В декартовой системе север = +Y, а на канвасе Y идет вниз
+        val sy = (cfg.originY - pdrY * cfg.pixelsPerMeter).coerceIn(10.0, 590.0)
+        return Pair(sx, sy)
     }
 
     /**
@@ -105,18 +145,18 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         _sessionDurationSeconds.value = 0L
         indoorTracker.startTracking()
         socketService.connect()
+        sendCurrentServerPosition()
         startPeriodicPositionSending()
         startDurationTimer()
-        addLog("Уборка начата. Сенсоры активны. Отправка каждые 2 сек.")
+        addLog("Уборка начата. Отправка координат на WSS каждые 2 сек.")
     }
 
     /**
      * Остановка сессии уборки.
      */
     fun stopCleaning() {
-        // Отправляем финальную точку
-        val pos = indoorTracker.trackerState.value.currentPosition
-        socketService.sendPosition(pos.x, pos.y, pos.floor)
+        stopSimulation()
+        sendCurrentServerPosition()
 
         periodicSendJob?.cancel()
         periodicSendJob = null
@@ -143,9 +183,7 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         if (floor < -3 || floor > 100) return
         indoorTracker.setFloor(floor)
         addLog("Установлен этаж: $floor")
-        // Немедленная отправка обновлённого этажа
-        val pos = indoorTracker.trackerState.value.currentPosition
-        socketService.sendPosition(pos.x, pos.y, floor)
+        sendCurrentServerPosition()
     }
 
     /**
@@ -154,8 +192,33 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
     fun resetPosition(x: Double = 0.0, y: Double = 0.0, headingDeg: Float = 0f) {
         indoorTracker.resetPosition(x, y, headingDeg)
         addLog("Координаты сброшены в (x=%.1f, y=%.1f, курс=%.0f°)".format(x, y, headingDeg))
-        val currentFloor = indoorTracker.trackerState.value.currentPosition.floor
-        socketService.sendPosition(x, y, currentFloor)
+        sendCurrentServerPosition()
+    }
+
+    /**
+     * Обновление имени клинера.
+     */
+    fun updateCleanerName(name: String) {
+        val trimmed = name.trim().ifEmpty { "cleaner-1" }
+        _serverMapConfig.update { it.copy(cleanerName = trimmed) }
+        socketService.updateCleanerName(trimmed)
+        addLog("Имя клинера обновлено: $trimmed")
+        sendCurrentServerPosition()
+    }
+
+    /**
+     * Обновление центра и масштаба привязки карты.
+     */
+    fun updateServerMapConfig(originX: Double, originY: Double, scalePxPerMeter: Double) {
+        _serverMapConfig.update {
+            it.copy(
+                originX = originX.coerceIn(50.0, 750.0),
+                originY = originY.coerceIn(50.0, 550.0),
+                pixelsPerMeter = scalePxPerMeter.coerceIn(5.0, 60.0)
+            )
+        }
+        addLog("Привязка к карте: центр (%.0f, %.0f), масштаб: %.0f px/м".format(originX, originY, scalePxPerMeter))
+        sendCurrentServerPosition()
     }
 
     /**
@@ -188,14 +251,64 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
     }
 
     /**
+     * Симуляция движения для наглядного теста отображения на веб-сайте.
+     */
+    fun toggleSimulation() {
+        if (_isSimulating.value) {
+            stopSimulation()
+        } else {
+            startSimulation()
+        }
+    }
+
+    private fun startSimulation() {
+        _isSimulating.value = true
+        if (!indoorTracker.trackerState.value.isTracking) {
+            startCleaning()
+        }
+        addLog("Запущена тестовая симуляция шагов...")
+
+        simulationJob?.cancel()
+        simulationJob = viewModelScope.launch {
+            var angle = 0.0
+            var radius = 6.0 // 6 метров
+            while (isActive && _isSimulating.value) {
+                delay(800L) // шаг каждые 0.8 сек
+                angle += 0.25
+                val simX = radius * cos(angle)
+                val simY = (radius * 0.7) * sin(angle)
+                val heading = ((Math.toDegrees(angle + Math.PI / 2) % 360 + 360) % 360).toFloat()
+                indoorTracker.resetPosition(simX, simY, heading)
+                sendCurrentServerPosition()
+            }
+        }
+    }
+
+    private fun stopSimulation() {
+        _isSimulating.value = false
+        simulationJob?.cancel()
+        simulationJob = null
+        addLog("Симуляция шагов остановлена.")
+    }
+
+    /**
+     * Отправка текущих вычисленных координат на сервер.
+     */
+    fun sendCurrentServerPosition() {
+        val pos = indoorTracker.trackerState.value.currentPosition
+        val (sx, sy) = calculateServerCoordinates(pos.x, pos.y)
+        val name = _serverMapConfig.value.cleanerName
+        socketService.sendPosition(sx, sy, pos.floor, name)
+    }
+
+    /**
      * Периодическая отправка координат на сервер каждые 2 секунды.
      */
     private fun startPeriodicPositionSending() {
         periodicSendJob?.cancel()
         periodicSendJob = viewModelScope.launch {
             while (isActive) {
-                val currentPos = indoorTracker.trackerState.value.currentPosition
-                socketService.sendPosition(currentPos.x, currentPos.y, currentPos.floor)
+                sendCurrentServerPosition()
                 delay(2000L) // Ровно каждые 2 секунды
             }
         }
@@ -210,6 +323,7 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
 
     override fun onCleared() {
         super.onCleared()
+        simulationJob?.cancel()
         periodicSendJob?.cancel()
         indoorTracker.stopTracking()
         socketService.disconnect()
@@ -232,5 +346,9 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
 data class TrackerUiState(
     val trackerState: TrackerState = TrackerState(),
     val connectionState: ConnectionState = ConnectionState.Disconnected,
-    val userId: String = ""
+    val userId: String = "",
+    val serverX: Double = 400.0,
+    val serverY: Double = 300.0,
+    val cleanerName: String = "cleaner-1",
+    val isSimulating: Boolean = false
 )

@@ -78,3 +78,18 @@ data class PdrConfig(
     val stepDeadTimeMs: Long = 320L,
     val useMagnetometerCorrection: Boolean = true
 )
+
+/**
+ * Конфигурация привязки к серверной карте (800x600 пикселей).
+ * @property originX Начальная координата X на карте (по умолчанию 400.0 - центр)
+ * @property originY Начальная координата Y на карте (по умолчанию 300.0 - центр)
+ * @property pixelsPerMeter Масштаб: сколько пикселей карты приходится на 1 метр перемещения
+ * @property cleanerName Имя клинера, отображаемое на веб-сайте
+ */
+data class ServerMapConfig(
+    val originX: Double = 400.0,
+    val originY: Double = 300.0,
+    val pixelsPerMeter: Double = 20.0,
+    val cleanerName: String = ""
+)
+

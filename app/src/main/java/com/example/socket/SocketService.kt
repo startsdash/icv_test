@@ -38,6 +38,7 @@ class SocketService(private val context: Context) {
         const val SERVER_URL = "https://icv.dotozen.ru"
         private const val PREFS_NAME = "cleaner_tracker_prefs"
         private const val KEY_USER_ID = "unique_user_id"
+        private const val KEY_CLEANER_NAME = "cleaner_custom_name"
 
         // Имена событий протокола Socket.io
         const val EVENT_POSITION_UPDATE = "position_update"
@@ -51,6 +52,19 @@ class SocketService(private val context: Context) {
      * Постоянный уникальный идентификатор клинера (UUID), генерируется при первом запуске.
      */
     val userId: String = getOrCreateUserId()
+
+    private val _cleanerName = MutableStateFlow(getSavedCleanerName())
+    val cleanerName: StateFlow<String> = _cleanerName.asStateFlow()
+
+    fun updateCleanerName(name: String) {
+        val trimmed = name.trim()
+        _cleanerName.value = trimmed
+        prefs.edit().putString(KEY_CLEANER_NAME, trimmed).apply()
+    }
+
+    private fun getSavedCleanerName(): String {
+        return prefs.getString(KEY_CLEANER_NAME, "") ?: ""
+    }
 
     private var socket: Socket? = null
 
@@ -144,9 +158,9 @@ class SocketService(private val context: Context) {
     /**
      * Отправка текущей позиции клинера на backend:
      * Событие: "position_update"
-     * Payload: { "userId": "string", "x": number, "y": number, "floor": number, "timestamp": long }
+     * Payload: { "userId": "string", "id": "string", "name": "string", "x": number, "y": number, "floor": number, "timestamp": long }
      */
-    fun sendPosition(x: Double, y: Double, floor: Int) {
+    fun sendPosition(x: Double, y: Double, floor: Int, customName: String? = null) {
         val s = socket
         if (s == null || !s.connected()) {
             Log.w(TAG, "Cannot send position: Socket is not connected (state=${_connectionState.value})")
@@ -156,8 +170,11 @@ class SocketService(private val context: Context) {
         scope.launch {
             try {
                 val now = System.currentTimeMillis()
+                val displayName = customName?.ifEmpty { null } ?: _cleanerName.value.ifEmpty { userId }
                 val payload = JSONObject().apply {
                     put("userId", userId)
+                    put("id", userId)
+                    put("name", displayName)
                     put("x", x)
                     put("y", y)
                     put("floor", floor)
@@ -167,7 +184,7 @@ class SocketService(private val context: Context) {
                 s.emit(EVENT_POSITION_UPDATE, payload)
                 _lastSentTimestamp.value = now
                 _packetsSentCount.value += 1
-                Log.d(TAG, "Sent position: (x=%.2f, y=%.2f, floor=%d)".format(x, y, floor))
+                Log.d(TAG, "Sent position: name=$displayName (x=%.2f, y=%.2f, floor=%d)".format(x, y, floor))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to emit position_update: ${e.message}", e)
             }

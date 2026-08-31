@@ -39,11 +39,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
@@ -60,6 +65,8 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -88,6 +95,7 @@ import androidx.core.content.ContextCompat
 import com.example.model.ConnectionState
 import com.example.model.PdrConfig
 import com.example.model.Position
+import com.example.model.ServerMapConfig
 import com.example.ui.components.IndoorMapCanvas
 import com.example.ui.theme.AccentGreen
 import com.example.ui.theme.AccentRed
@@ -134,6 +142,8 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val otherUsers by viewModel.mapUpdates.collectAsState()
     val pdrConfig by viewModel.pdrConfig.collectAsState()
+    val serverMapConfig by viewModel.serverMapConfig.collectAsState()
+    val isSimulating by viewModel.isSimulating.collectAsState()
     val activityLogs by viewModel.activityLogs.collectAsState()
     val sessionDuration by viewModel.sessionDurationSeconds.collectAsState()
 
@@ -178,6 +188,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
             // 1. Верхняя панель: Indoor Track v1.0, Cleaner Console, Socket status, ID
             CleanHeaderBar(
                 userId = uiState.userId,
+                cleanerName = uiState.cleanerName,
                 connectionState = uiState.connectionState,
                 onReconnect = { viewModel.reconnectSocket() },
                 onOpenSettings = { showSettingsSheet = true }
@@ -204,24 +215,33 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
                 packetsCount = uiState.trackerState.packetsSentCount
             )
 
-            // 5. Нижняя панель действий (Завершить/Начать уборку + Навигационные контролы)
+            // 5. Нижняя панель действий (Завершить/Начать уборку + Симуляция + Логи + Настройки)
             CleanBottomControlSection(
                 isTracking = uiState.trackerState.isTracking,
+                isSimulating = isSimulating,
                 onToggleCleaning = { viewModel.toggleCleaningSession() },
+                onToggleSimulation = { viewModel.toggleSimulation() },
                 onOpenLogs = { showLogsDialog = true },
                 onOpenSettings = { showSettingsSheet = true }
             )
         }
 
-        // Модальное окно калибровки и настроек PDR
+        // Модальное окно калибровки и настроек PDR и веб-карты
         if (showSettingsSheet) {
             SettingsBottomSheet(
                 config = pdrConfig,
+                mapConfig = serverMapConfig,
                 currentPosition = uiState.trackerState.currentPosition,
                 onDismiss = { showSettingsSheet = false },
+                onUpdateCleanerName = { viewModel.updateCleanerName(it) },
+                onUpdateMapConfig = { ox, oy, scale -> viewModel.updateServerMapConfig(ox, oy, scale) },
                 onUpdateStepLength = { viewModel.updateStepLength(it) },
                 onUpdateThreshold = { viewModel.updateStepThreshold(it) },
-                onReset = { viewModel.resetPosition(0.0, 0.0, 0f) }
+                onReset = { viewModel.resetPosition(0.0, 0.0, 0f) },
+                onSendTestCenter = {
+                    viewModel.resetPosition(0.0, 0.0, 0f)
+                    viewModel.sendCurrentServerPosition()
+                }
             )
         }
 
@@ -241,6 +261,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
 @Composable
 fun CleanHeaderBar(
     userId: String,
+    cleanerName: String,
     connectionState: ConnectionState,
     onReconnect: () -> Unit,
     onOpenSettings: () -> Unit
@@ -261,8 +282,8 @@ fun CleanHeaderBar(
                 letterSpacing = 1.sp
             )
             Text(
-                text = "Cleaner Console",
-                fontSize = 22.sp,
+                text = cleanerName.ifEmpty { "Cleaner Console" },
+                fontSize = 20.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = TextPrimary
             )
@@ -294,7 +315,7 @@ fun CleanHeaderBar(
                         .background(dotColor)
                 )
                 Text(
-                    text = "wss://icv.dotozen.ru",
+                    text = "icv.dotozen.ru",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextMuted
@@ -302,7 +323,7 @@ fun CleanHeaderBar(
             }
 
             Text(
-                text = "ID: ${userId.takeLast(12)}",
+                text = "ID: ${userId.takeLast(10)}",
                 fontSize = 10.sp,
                 color = TextSecondary,
                 fontFamily = FontFamily.Monospace
@@ -333,7 +354,7 @@ fun CleanPositionCard(
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Верхняя плашка карточки: иконка локации + этаж / зона
             Row(
@@ -369,8 +390,8 @@ fun CleanPositionCard(
                             letterSpacing = 0.5.sp
                         )
                         Text(
-                            text = "Floor %02d • Zone Main".format(pos.floor),
-                            fontSize = 13.sp,
+                            text = "Этаж %d • Сайт [0..800, 0..600]".format(pos.floor),
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = PrimaryBlue
                         )
@@ -418,17 +439,46 @@ fun CleanPositionCard(
             ) {
                 // X-Coordinate
                 CleanCoordinateBox(
-                    label = "X-COORDINATE",
+                    label = "X (МЕТРЫ)",
                     value = "%.2f".format(pos.x),
+                    subLabel = "Web: %.0f px".format(uiState.serverX),
                     modifier = Modifier.weight(1f)
                 )
 
                 // Y-Coordinate
                 CleanCoordinateBox(
-                    label = "Y-COORDINATE",
+                    label = "Y (МЕТРЫ)",
                     value = "%.2f".format(pos.y),
+                    subLabel = "Web: %.0f px".format(uiState.serverY),
                     modifier = Modifier.weight(1f)
                 )
+            }
+
+            if (uiState.isSimulating) {
+                Surface(
+                    color = PrimaryContainer,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(PrimaryBlue)
+                        )
+                        Text(
+                            text = "Активна симуляция шагов: маркер перемещается на сайте",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = OnPrimaryContainer
+                        )
+                    }
+                }
             }
         }
     }
@@ -438,30 +488,31 @@ fun CleanPositionCard(
 fun CleanCoordinateBox(
     label: String,
     value: String,
+    subLabel: String = "",
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(18.dp))
             .background(CleanChipBg)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Column {
             Text(
                 text = label,
-                fontSize = 11.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextSecondary,
                 letterSpacing = 0.5.sp
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Row(
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
                     text = value,
-                    fontSize = 28.sp,
+                    fontSize = 24.sp,
                     fontWeight = FontWeight.Light,
                     color = TextPrimary,
                     fontFamily = FontFamily.SansSerif,
@@ -469,9 +520,18 @@ fun CleanCoordinateBox(
                 )
                 Text(
                     text = "m",
-                    fontSize = 15.sp,
+                    fontSize = 13.sp,
                     color = TextSecondary.copy(alpha = 0.7f),
                     modifier = Modifier.padding(bottom = 3.dp)
+                )
+            }
+            if (subLabel.isNotEmpty()) {
+                Text(
+                    text = subLabel,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = PrimaryBlue,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
@@ -664,7 +724,9 @@ fun CleanActiveSessionCard(
 @Composable
 fun CleanBottomControlSection(
     isTracking: Boolean,
+    isSimulating: Boolean,
     onToggleCleaning: () -> Unit,
+    onToggleSimulation: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -707,11 +769,11 @@ fun CleanBottomControlSection(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = 4.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Вкладка Главная
+            // 1. Вкладка Главная
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.padding(2.dp)
@@ -739,7 +801,39 @@ fun CleanBottomControlSection(
                 )
             }
 
-            // Кнопка Логи WSS
+            // 2. Кнопка Симуляция движения для теста сайта
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onToggleSimulation() }
+                    .padding(2.dp)
+                    .testTag("simulation_button")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 44.dp, height = 28.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSimulating) PrimaryContainer else Color.Transparent),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isSimulating) Icons.Default.PauseCircle else Icons.Default.DirectionsWalk,
+                        contentDescription = "Симуляция шагов",
+                        tint = if (isSimulating) PrimaryBlue else TextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (isSimulating) "Стоп тест" else "Тест шагов",
+                    fontSize = 10.sp,
+                    fontWeight = if (isSimulating) FontWeight.Bold else FontWeight.Medium,
+                    color = if (isSimulating) PrimaryBlue else TextSecondary
+                )
+            }
+
+            // 3. Кнопка Логи WSS
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -769,7 +863,7 @@ fun CleanBottomControlSection(
                 )
             }
 
-            // Кнопка Настройки
+            // 4. Кнопка Настройки
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -804,168 +898,220 @@ fun CleanBottomControlSection(
 }
 
 /**
- * Bottom Sheet для калибровки PDR алгоритма и сброса координат.
+ * Bottom Sheet для калибровки PDR алгоритма, настроек веб-карты и сброса координат.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsBottomSheet(
     config: PdrConfig,
+    mapConfig: ServerMapConfig,
     currentPosition: Position,
     onDismiss: () -> Unit,
+    onUpdateCleanerName: (String) -> Unit,
+    onUpdateMapConfig: (Double, Double, Double) -> Unit,
     onUpdateStepLength: (Double) -> Unit,
     onUpdateThreshold: (Float) -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    onSendTestCenter: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     var stepLen by remember { mutableFloatStateOf(config.stepLength.toFloat()) }
     var threshold by remember { mutableFloatStateOf(config.stepThreshold) }
+    var originX by remember { mutableFloatStateOf(mapConfig.originX.toFloat()) }
+    var originY by remember { mutableFloatStateOf(mapConfig.originY.toFloat()) }
+    var scalePx by remember { mutableFloatStateOf(mapConfig.pixelsPerMeter.toFloat()) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = CleanSurface
     ) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(horizontal = 20.dp, vertical = 8.dp)
                 .padding(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(
-                text = "Калибровка PDR и датчиков",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary
-            )
-
-            // 1. Длина шага
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "Длина шага клинера",
-                        fontSize = 14.sp,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = "%.2f м".format(stepLen),
-                        fontWeight = FontWeight.Bold,
-                        color = PrimaryBlue
-                    )
-                }
-                Slider(
-                    value = stepLen,
-                    onValueChange = {
-                        stepLen = it
-                        onUpdateStepLength(it.toDouble())
-                    },
-                    valueRange = 0.4f..1.2f,
-                    steps = 15,
-                    colors = SliderDefaults.colors(
-                        thumbColor = PrimaryBlue,
-                        activeTrackColor = PrimaryBlue
-                    )
+            item {
+                Text(
+                    text = "Настройки и интеграция с веб-сайтом",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
                 )
             }
 
-            // 2. Порог акселерометра для детекции шага
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+            // 1. Быстрая проверка отправки в центр
+            item {
+                Surface(
+                    color = PrimaryContainer,
+                    shape = RoundedCornerShape(14.dp)
                 ) {
-                    Text(
-                        text = "Порог детекции шага (акселерометр)",
-                        fontSize = 14.sp,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = "%.2f м/с²".format(threshold),
-                        fontWeight = FontWeight.Bold,
-                        color = PrimaryBlue
-                    )
-                }
-                Slider(
-                    value = threshold,
-                    onValueChange = {
-                        threshold = it
-                        onUpdateThreshold(it)
-                    },
-                    valueRange = 0.8f..3.0f,
-                    steps = 21,
-                    colors = SliderDefaults.colors(
-                        thumbColor = PrimaryBlue,
-                        activeTrackColor = PrimaryBlue
-                    )
-                )
-            }
-
-            // 3. Статус WiFi модуля
-            Surface(
-                color = CleanChipBg,
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Wifi,
-                        contentDescription = null,
-                        tint = PrimaryBlue,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Column {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text(
-                            text = "WiFi Scanning Interface",
-                            fontSize = 12.sp,
+                            text = "Координаты на веб-сервере (icv.dotozen.ru)",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            color = TextPrimary
+                            color = OnPrimaryContainer
                         )
                         Text(
-                            text = "Заглушка готова (задел под Fingerprinting / трилатерацию)",
+                            text = "Сайт использует холст 800×600 px. Приложение автоматически пересчитывает метры шагов в пиксели холста.",
                             fontSize = 11.sp,
-                            color = TextSecondary
+                            color = OnPrimaryContainer.copy(alpha = 0.8f)
                         )
+                        Button(
+                            onClick = onSendTestCenter,
+                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(imageVector = Icons.Default.LocationOn, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Отправить маркер в центр сайта (400, 300)")
+                        }
                     }
                 }
             }
 
-            // 4. Кнопки сброса координат
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedButton(
-                    onClick = {
-                        onReset()
-                        onDismiss()
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
-                        .testTag("reset_position_button")
-                ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Сброс в (0,0)")
+            // 2. Длина шага клинера
+            item {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Длина шага клинера",
+                            fontSize = 14.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "%.2f м".format(stepLen),
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryBlue
+                        )
+                    }
+                    Slider(
+                        value = stepLen,
+                        onValueChange = {
+                            stepLen = it
+                            onUpdateStepLength(it.toDouble())
+                        },
+                        valueRange = 0.4f..1.2f,
+                        steps = 15,
+                        colors = SliderDefaults.colors(
+                            thumbColor = PrimaryBlue,
+                            activeTrackColor = PrimaryBlue
+                        )
+                    )
                 }
+            }
 
-                Button(
-                    onClick = onDismiss,
-                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(48.dp)
+            // 3. Порог акселерометра для детекции шага
+            item {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Порог детекции шага (акселерометр)",
+                            fontSize = 14.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "%.2f м/с²".format(threshold),
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryBlue
+                        )
+                    }
+                    Slider(
+                        value = threshold,
+                        onValueChange = {
+                            threshold = it
+                            onUpdateThreshold(it)
+                        },
+                        valueRange = 0.8f..3.0f,
+                        steps = 21,
+                        colors = SliderDefaults.colors(
+                            thumbColor = PrimaryBlue,
+                            activeTrackColor = PrimaryBlue
+                        )
+                    )
+                }
+            }
+
+            // 4. Масштаб пикселей на метр
+            item {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Масштаб на веб-карте (px / метр)",
+                            fontSize = 14.sp,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "%.0f px/м".format(scalePx),
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryBlue
+                        )
+                    }
+                    Slider(
+                        value = scalePx,
+                        onValueChange = {
+                            scalePx = it
+                            onUpdateMapConfig(originX.toDouble(), originY.toDouble(), it.toDouble())
+                        },
+                        valueRange = 5f..50f,
+                        steps = 18,
+                        colors = SliderDefaults.colors(
+                            thumbColor = PrimaryBlue,
+                            activeTrackColor = PrimaryBlue
+                        )
+                    )
+                }
+            }
+
+            // 5. Кнопки сброса координат
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Готово")
+                    OutlinedButton(
+                        onClick = {
+                            onReset()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("reset_position_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Сброс (0,0)")
+                    }
+
+                    Button(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        Text("Готово")
+                    }
                 }
             }
         }
