@@ -30,7 +30,6 @@ sealed class ConnectionState {
 enum class CleaningMode(val title: String, val shortName: String, val iconEmoji: String, val colorHex: Long) {
     WET_CLEANING("Влажная уборка", "Влажная", "💧", 0xFF0284C7),
     DRY_VACUUM("Сухая уборка / Пылесос", "Сухая", "🧹", 0xFFF59E0B),
-    DISINFECTION("Санобработка / Дезинфекция", "Санобработка", "🛡️", 0xFF10B981),
     IDLE_TRANSIT("Переход / Простой", "Простой", "🚶", 0xFF6B7280)
 }
 

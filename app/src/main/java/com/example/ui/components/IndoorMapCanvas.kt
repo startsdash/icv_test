@@ -268,7 +268,6 @@ fun IndoorMapCanvas(
                         val segColor = when (seg.mode) {
                             CleaningMode.WET_CLEANING -> Color(0xFF0284C7).copy(alpha = 0.35f)
                             CleaningMode.DRY_VACUUM -> Color(0xFFF59E0B).copy(alpha = 0.35f)
-                            CleaningMode.DISINFECTION -> Color(0xFF10B981).copy(alpha = 0.35f)
                             CleaningMode.IDLE_TRANSIT -> Color(0xFF9CA3AF).copy(alpha = 0.15f)
                         }
 
@@ -355,7 +354,6 @@ fun IndoorMapCanvas(
             val toolColor = when (cleaningMode) {
                 CleaningMode.WET_CLEANING -> Color(0xFF0284C7)
                 CleaningMode.DRY_VACUUM -> Color(0xFFF59E0B)
-                CleaningMode.DISINFECTION -> Color(0xFF10B981)
                 CleaningMode.IDLE_TRANSIT -> Color(0xFF6B7280)
             }
 

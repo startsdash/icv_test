@@ -195,14 +195,17 @@ class TrackingManager private constructor(private val appContext: Context) {
     // =========================================================================
 
     fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int) {
+        indoorTracker.startTracking()
         indoorTracker.startPerimeterMapping(name, category, floor)
         addLog("Начата разметка периметра: $name (${category.title}, эт. $floor)")
+        sendCurrentServerPosition()
     }
 
     fun addPerimeterPoint() {
         indoorTracker.addPerimeterPoint()
         val pState = indoorTracker.trackerState.value.perimeterState
         addLog("Добавлена точка #${pState.perimeterPoints.size} в контур (Периметр: %.1f м)".format(pState.computedPerimeterMeters))
+        sendCurrentServerPosition()
     }
 
     fun closePerimeter() {
@@ -221,6 +224,7 @@ class TrackingManager private constructor(private val appContext: Context) {
                 points = serverPoints,
                 areaM2 = zone.areaSquareMeters
             )
+            sendCurrentServerPosition()
         } else {
             addLog("Для замыкания контура требуется минимум 3 точки!")
         }
@@ -229,6 +233,7 @@ class TrackingManager private constructor(private val appContext: Context) {
     fun cancelPerimeterMapping() {
         indoorTracker.cancelPerimeterMapping()
         addLog("Разметка периметра отменена")
+        sendCurrentServerPosition()
     }
 
     fun selectActiveZone(zone: FacilityZone?) {
