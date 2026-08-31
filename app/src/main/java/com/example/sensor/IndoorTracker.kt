@@ -5,6 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Process
+import android.util.Log
 import com.example.model.PdrConfig
 import com.example.model.Position
 import com.example.model.TrackerState
@@ -31,24 +35,30 @@ import kotlin.math.sqrt
  * - Гироскоп: высокочастотная интеграция угловой скорости для отслеживания курса/азимута.
  * - Магнитометр: опциональная долгосрочная коррекция накопленного дрейфа гироскопа.
  *
- * Все вычисления производятся в фоновом пуле корутин (Dispatchers.Default).
+ * Обработка датчиков вынесена в отдельный HandlerThread с высоким приоритетом,
+ * что гарантирует непрерывную работу при заблокированном/выключенном экране.
  */
 class IndoorTracker(
     context: Context,
     private var config: PdrConfig = PdrConfig()
 ) : SensorEventListener {
 
-    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+    private val appContext = context.applicationContext
+    private val sensorManager = appContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
     private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     private val magnetometer = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+    // Выделенный фоновый поток для получения прерываний от датчиков ОС при выключенном экране
+    private var sensorThread: HandlerThread? = null
+    private var sensorHandler: Handler? = null
 
     // Фоновый скоуп для математических расчётов вне UI-потока
     private val trackerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     // Буферизованный канал событий датчиков для быстрой передачи из callback в фоновый поток
     private val sensorEventFlow = MutableSharedFlow<RawSensorData>(
-        extraBufferCapacity = 128,
+        extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
@@ -108,11 +118,22 @@ class IndoorTracker(
         lastStepTimestampNs = 0L
         lastGyroTimestampNs = 0L
 
-        sensorManager?.let { sm ->
-            // Частота опроса: SENSOR_DELAY_GAME (~20-50 Гц) оптимальна для PDR без перегрузки батареи
-            accelerometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-            gyroscope?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-            magnetometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        try {
+            val thread = HandlerThread("PdrSensorBackgroundThread", Process.THREAD_PRIORITY_MORE_FAVORABLE)
+            thread.start()
+            sensorThread = thread
+            val handler = Handler(thread.looper)
+            sensorHandler = handler
+
+            sensorManager?.let { sm ->
+                // Частота опроса: SENSOR_DELAY_GAME (~20-50 Гц) оптимальна для PDR без перегрузки батареи
+                accelerometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
+                gyroscope?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
+                magnetometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
+            }
+            Log.i("IndoorTracker", "Sensor listener registered on background HandlerThread")
+        } catch (e: Exception) {
+            Log.e("IndoorTracker", "Failed to start sensor thread: ${e.message}", e)
         }
 
         _trackerState.update {
@@ -134,7 +155,15 @@ class IndoorTracker(
     fun stopTracking() {
         if (!isTracking) return
         isTracking = false
-        sensorManager?.unregisterListener(this)
+        try {
+            sensorManager?.unregisterListener(this)
+            sensorThread?.quitSafely()
+            sensorThread = null
+            sensorHandler = null
+            Log.i("IndoorTracker", "Sensor listener unregistered and thread stopped")
+        } catch (e: Exception) {
+            Log.e("IndoorTracker", "Error stopping sensor tracker: ${e.message}", e)
+        }
         _trackerState.update { it.copy(isTracking = false) }
     }
 
@@ -383,6 +412,28 @@ class IndoorTracker(
                 stepCount = stepCount,
                 totalDistance = totalDistance,
                 headingDegrees = Math.toDegrees(headingRadians).toFloat(),
+                trajectory = updatedTrajectory
+            )
+        }
+    }
+
+    /**
+     * Симуляция шага для тестирования траектории
+     */
+    fun simulateStep(pos: Position, headingDeg: Float, newStepCount: Int) {
+        currentX = pos.x
+        currentY = pos.y
+        stepCount = newStepCount
+        totalDistance = newStepCount * config.stepLength
+        headingRadians = Math.toRadians(headingDeg.toDouble())
+
+        _trackerState.update { state ->
+            val updatedTrajectory = (state.trajectory + pos).takeLast(500)
+            state.copy(
+                currentPosition = pos,
+                stepCount = stepCount,
+                totalDistance = totalDistance,
+                headingDegrees = headingDeg,
                 trajectory = updatedTrajectory
             )
         }

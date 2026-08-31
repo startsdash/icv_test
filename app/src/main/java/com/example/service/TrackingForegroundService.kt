@@ -8,26 +8,43 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
+import com.example.manager.TrackingManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 /**
  * Foreground Service для поддержания непрерывного сбора данных с датчиков (PDR)
  * и передачи координат по Socket.io в фоновом режиме, даже когда пользователь
- * переключается в браузер или экран телефона заблокирован.
+ * переключается в браузер или экран телефона заблокирован/выключен.
  */
 class TrackingForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var notificationUpdateJob: Job? = null
+    private var notificationManager: NotificationManager? = null
 
     override fun onCreate() {
         super.onCreate()
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         acquireWakeLock()
+        acquireWifiLock()
         createNotificationChannel()
+        startNotificationLiveUpdater()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -37,28 +54,48 @@ class TrackingForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification = buildNotification("Трекинг активен", "Координаты передаются на сервер в реальном времени")
+        val notification = buildNotification(
+            "Уборка активна",
+            "Координаты передаются на icv.dotozen.ru в реальном времени"
+        )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 )
             } else {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                )
+                startForeground(NOTIFICATION_ID, notification)
             }
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+            Log.i(TAG, "TrackingForegroundService started in foreground")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground notification: ${e.message}", e)
         }
-
-        Log.i(TAG, "TrackingForegroundService started in foreground")
         return START_STICKY
+    }
+
+    private fun startNotificationLiveUpdater() {
+        notificationUpdateJob?.cancel()
+        notificationUpdateJob = serviceScope.launch {
+            val manager = TrackingManager.getInstance(applicationContext)
+            manager.uiState.collectLatest { state ->
+                val steps = state.trackerState.stepCount
+                val x = state.serverX
+                val y = state.serverY
+                val isSim = state.isSimulating
+                val prefix = if (isSim) "[ТЕСТ] " else ""
+                val text = "${prefix}Шагов: $steps | Сайт: (${x.toInt()}px, ${y.toInt()}px) | WSS: ${state.connectionState.displayName}"
+
+                try {
+                    val updatedNotification = buildNotification("Cleaner Track v1.0", text)
+                    notificationManager?.notify(NOTIFICATION_ID, updatedNotification)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to update notification: ${e.message}")
+                }
+            }
+        }
     }
 
     private fun acquireWakeLock() {
@@ -92,8 +129,43 @@ class TrackingForegroundService : Service() {
         }
     }
 
+    private fun acquireWifiLock() {
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifiManager?.createWifiLock(lockType, "CleanerTracker::WifiLock")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            Log.d(TAG, "WifiLock acquired")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to acquire WifiLock: ${e.message}", e)
+        }
+    }
+
+    private fun releaseWifiLock() {
+        try {
+            wifiLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d(TAG, "WifiLock released")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing WifiLock: ${e.message}", e)
+        } finally {
+            wifiLock = null
+        }
+    }
+
     private fun stopForegroundService() {
+        notificationUpdateJob?.cancel()
         releaseWakeLock()
+        releaseWifiLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         Log.i(TAG, "TrackingForegroundService stopped")
@@ -106,11 +178,10 @@ class TrackingForegroundService : Service() {
                 "Служба отслеживания уборки",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Обеспечивает непрерывную передачу координат при переключении между приложениями"
+                description = "Обеспечивает непрерывную передачу координат при переключении между приложениями и выключенном экране"
                 setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            notificationManager?.createNotificationChannel(channel)
         }
     }
 
@@ -138,7 +209,9 @@ class TrackingForegroundService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        serviceScope.cancel()
         releaseWakeLock()
+        releaseWifiLock()
         Log.i(TAG, "TrackingForegroundService destroyed")
     }
 

@@ -12,6 +12,14 @@ sealed class ConnectionState {
     object Connecting : ConnectionState()
     object Connected : ConnectionState()
     data class Error(val message: String) : ConnectionState()
+
+    val displayName: String
+        get() = when (this) {
+            is Connected -> "Подключен"
+            is Connecting -> "Подключение..."
+            is Disconnected -> "Отключен"
+            is Error -> "Ошибка"
+        }
 }
 
 /**
