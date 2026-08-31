@@ -96,6 +96,7 @@ import com.example.model.ConnectionState
 import com.example.model.PdrConfig
 import com.example.model.Position
 import com.example.model.ServerMapConfig
+import com.example.service.TrackingForegroundService
 import com.example.ui.components.IndoorMapCanvas
 import com.example.ui.theme.AccentGreen
 import com.example.ui.theme.AccentRed
@@ -163,12 +164,24 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.HIGH_SAMPLING_RATE_SENSORS)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         val needed = permissions.filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
         if (needed.isNotEmpty()) {
             permissionLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    // Управление фоновым сервисом для непрерывной работы при переключении в браузер
+    LaunchedEffect(uiState.trackerState.isTracking, isSimulating) {
+        if (uiState.trackerState.isTracking || isSimulating) {
+            TrackingForegroundService.start(context)
+        } else {
+            TrackingForegroundService.stop(context)
         }
     }
 
