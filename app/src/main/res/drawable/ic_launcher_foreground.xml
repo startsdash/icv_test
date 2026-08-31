@@ -1,0 +1,34 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Path breadcrumbs line -->
+    <path
+        android:pathData="M34,74 C34,60 48,58 48,46 C48,36 60,36 60,26"
+        android:strokeWidth="3.5"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    
+    <!-- Path dots / footsteps -->
+    <path
+        android:fillColor="#60A5FA"
+        android:pathData="M34,74m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M48,52m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,38m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+
+    <!-- Current Position Heading Pointer / Compass Arrow -->
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M60,20 L68,36 L60,32 L52,36 Z" />
+    
+    <!-- Clean sparkle accent -->
+    <path
+        android:fillColor="#FACC15"
+        android:pathData="M76,46 L78,52 L84,54 L78,56 L76,62 L74,56 L68,54 L74,52 Z" />
+</vector>

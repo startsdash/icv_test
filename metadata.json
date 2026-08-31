@@ -1,0 +1,6 @@
+{
+  "name": "Cleaner Tracker",
+  "description": "Приложение для клинеров с трекингом перемещений внутри помещений без GPS (PDR: акселерометр + гироскоп + Socket.io)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
