@@ -2,7 +2,10 @@ package com.example.manager
 
 import android.content.Context
 import android.util.Log
+import com.example.model.CleaningMode
 import com.example.model.ConnectionState
+import com.example.model.FacilityZone
+import com.example.model.ObjectCategory
 import com.example.model.PdrConfig
 import com.example.model.Position
 import com.example.model.ServerMapConfig
@@ -35,9 +38,8 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * Singleton-менеджер трекинга и синхронизации.
- * Управляет жизненным циклом PDR-датчиков, Socket.io соединением и фоновой отправкой,
- * независимо от активности UI (работает в фоне и при выключенном экране).
+ * Singleton-менеджер трекинга, расчета покрытия уборки и разметки контуров объектов.
+ * Управляет жизненным циклом PDR-датчиков, Socket.io соединением и фоновой отправкой.
  */
 class TrackingManager private constructor(private val appContext: Context) {
 
@@ -130,7 +132,7 @@ class TrackingManager private constructor(private val appContext: Context) {
     /**
      * Преобразование метров PDR в пиксели холста сервера 800x600
      */
-    private fun calculateServerCoords(pdrX: Double, pdrY: Double, config: ServerMapConfig): Pair<Double, Double> {
+    fun calculateServerCoords(pdrX: Double, pdrY: Double, config: ServerMapConfig = _serverMapConfig.value): Pair<Double, Double> {
         val serverX = (config.originX + (pdrX * config.pixelsPerMeter)).coerceIn(10.0, 790.0)
         val serverY = (config.originY - (pdrY * config.pixelsPerMeter)).coerceIn(10.0, 590.0)
         return Pair(serverX, serverY)
@@ -155,7 +157,9 @@ class TrackingManager private constructor(private val appContext: Context) {
 
         startPeriodicSending()
         startDurationTimer()
-        addLog("Сессия уборки начата. Фоновый сервис запущен.")
+        val mode = indoorTracker.trackerState.value.cleaningMode
+        val zone = indoorTracker.trackerState.value.currentZone?.name ?: "Без объекта"
+        addLog("Сессия уборки начата [${mode.title}] на объекте: $zone")
     }
 
     fun stopCleaningSession(context: Context) {
@@ -164,12 +168,87 @@ class TrackingManager private constructor(private val appContext: Context) {
         stopPeriodicSending()
         stopDurationTimer()
         TrackingForegroundService.stop(context)
-        addLog("Сессия уборки завершена. Пройдено шагов: ${indoorTracker.trackerState.value.stepCount}")
+        val tState = indoorTracker.trackerState.value
+        addLog("Сессия завершена. Шагов: ${tState.stepCount}, Покрыто: %.1f м²".format(tState.coveredAreaM2))
     }
 
     /**
-     * Симуляция движения клинера
+     * Смена режима уборки (Влажная, Сухая, Санобработка, Простой)
      */
+    fun updateCleaningMode(mode: CleaningMode) {
+        indoorTracker.updateCleaningMode(mode)
+        addLog("Режим уборки изменен: ${mode.iconEmoji} ${mode.title}")
+        sendCurrentServerPosition()
+    }
+
+    /**
+     * Смена ширины захвата швабры/пылесоса
+     */
+    fun updateCleaningWidth(widthMeters: Double) {
+        indoorTracker.updateCleaningWidth(widthMeters)
+        addLog("Ширина захвата инвентаря: %.0f см".format(widthMeters * 100))
+        sendCurrentServerPosition()
+    }
+
+    // =========================================================================
+    //  РАЗМЕТКА ПЕРИМЕТРА ОБЪЕКТА (ПОДЪЕЗД / ДВОР)
+    // =========================================================================
+
+    fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int) {
+        indoorTracker.startPerimeterMapping(name, category, floor)
+        addLog("Начата разметка периметра: $name (${category.title}, эт. $floor)")
+    }
+
+    fun addPerimeterPoint() {
+        indoorTracker.addPerimeterPoint()
+        val pState = indoorTracker.trackerState.value.perimeterState
+        addLog("Добавлена точка #${pState.perimeterPoints.size} в контур (Периметр: %.1f м)".format(pState.computedPerimeterMeters))
+    }
+
+    fun closePerimeter() {
+        val zone = indoorTracker.closePerimeter()
+        if (zone != null) {
+            addLog("Контур замкнут! Создан объект: ${zone.name} (Площадь: %.1f м²)".format(zone.areaSquareMeters))
+            // Отправляем полигон на сервер через сокет
+            val serverPoints = zone.polygonPoints.map { pt ->
+                calculateServerCoords(pt.x, pt.y, _serverMapConfig.value)
+            }
+            socketService.sendZonePerimeter(
+                zoneId = zone.id,
+                zoneName = zone.name,
+                category = zone.category.name,
+                floor = zone.floor,
+                points = serverPoints,
+                areaM2 = zone.areaSquareMeters
+            )
+        } else {
+            addLog("Для замыкания контура требуется минимум 3 точки!")
+        }
+    }
+
+    fun cancelPerimeterMapping() {
+        indoorTracker.cancelPerimeterMapping()
+        addLog("Разметка периметра отменена")
+    }
+
+    fun selectActiveZone(zone: FacilityZone?) {
+        indoorTracker.selectActiveZone(zone)
+        zone?.let {
+            indoorTracker.setFloor(it.floor)
+            addLog("Выбран активный объект: ${it.name}")
+        }
+        sendCurrentServerPosition()
+    }
+
+    fun deleteZone(zoneId: String) {
+        indoorTracker.deleteZone(zoneId)
+        addLog("Объект удален из списка")
+    }
+
+    // =========================================================================
+    //  СИМУЛЯЦИЯ И ОТПРАВКА ДАННЫХ
+    // =========================================================================
+
     fun toggleSimulation(context: Context) {
         if (_isSimulating.value) {
             stopSimulation()
@@ -186,16 +265,16 @@ class TrackingManager private constructor(private val appContext: Context) {
         if (_isSimulating.value) return
         _isSimulating.value = true
         TrackingForegroundService.start(context)
-        addLog("Запущена непрерывная симуляция шагов")
+        addLog("Запущена непрерывная симуляция уборки")
 
         simulationJob?.cancel()
         simulationJob = managerScope.launch {
             var angle = 0.0
             var simStep = 0
-            val radiusMeters = 8.0
+            val radiusMeters = 7.0
 
             while (isActive && _isSimulating.value) {
-                angle += 0.15
+                angle += 0.12
                 simStep++
                 val pdrX = radiusMeters * cos(angle)
                 val pdrY = (radiusMeters * 0.6) * sin(angle * 1.5)
@@ -204,20 +283,13 @@ class TrackingManager private constructor(private val appContext: Context) {
                 val newPos = Position(
                     x = pdrX,
                     y = pdrY,
-                    floor = 1,
+                    floor = indoorTracker.trackerState.value.currentPosition.floor,
                     timestamp = System.currentTimeMillis()
                 )
 
                 indoorTracker.simulateStep(newPos, headingDeg, simStep)
 
-                val (sx, sy) = calculateServerCoords(pdrX, pdrY, _serverMapConfig.value)
-                socketService.sendPosition(
-                    x = sx,
-                    y = sy,
-                    floor = newPos.floor,
-                    customName = _serverMapConfig.value.cleanerName
-                )
-
+                sendCurrentServerPosition()
                 delay(800L) // Шаг каждые 800 мс
             }
         }
@@ -245,14 +317,21 @@ class TrackingManager private constructor(private val appContext: Context) {
     }
 
     fun sendCurrentServerPosition() {
-        val currentPdr = indoorTracker.trackerState.value.currentPosition
+        val tState = indoorTracker.trackerState.value
+        val currentPdr = tState.currentPosition
         val (sx, sy) = calculateServerCoords(currentPdr.x, currentPdr.y, _serverMapConfig.value)
 
         socketService.sendPosition(
             x = sx,
             y = sy,
             floor = currentPdr.floor,
-            customName = _serverMapConfig.value.cleanerName
+            customName = _serverMapConfig.value.cleanerName,
+            cleaningWidthMeters = tState.cleaningWidthMeters,
+            cleaningModeName = tState.cleaningMode.name,
+            cleaningModeTitle = tState.cleaningMode.title,
+            coveredAreaM2 = tState.coveredAreaM2,
+            headingDegrees = tState.headingDegrees,
+            zoneName = tState.currentZone?.name ?: ""
         )
     }
 
@@ -281,6 +360,7 @@ class TrackingManager private constructor(private val appContext: Context) {
     fun resetPosition(x: Double = 0.0, y: Double = 0.0, headingDeg: Float = 0f) {
         indoorTracker.resetPosition(x, y, headingDeg)
         addLog("Координаты сброшены в ($x, $y)")
+        sendCurrentServerPosition()
     }
 
     fun setFloor(floor: Int) {
@@ -291,7 +371,9 @@ class TrackingManager private constructor(private val appContext: Context) {
 
     fun updateCleanerName(name: String) {
         socketService.updateCleanerName(name)
+        _serverMapConfig.update { it.copy(cleanerName = name) }
         addLog("Имя клинера: ${socketService.cleanerName.value}")
+        sendCurrentServerPosition()
     }
 
     fun updateServerMapConfig(originX: Double, originY: Double, pixelsPerMeter: Double) {

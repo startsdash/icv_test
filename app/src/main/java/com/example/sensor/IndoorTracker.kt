@@ -9,7 +9,12 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
+import com.example.model.CleaningMode
+import com.example.model.CoverageSegment
+import com.example.model.FacilityZone
+import com.example.model.ObjectCategory
 import com.example.model.PdrConfig
+import com.example.model.PerimeterMappingState
 import com.example.model.Position
 import com.example.model.TrackerState
 import kotlinx.coroutines.CoroutineScope
@@ -22,41 +27,35 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 import kotlin.math.PI
-import kotlin.math.atan2
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Модуль автономного позиционирования внутри помещений (PDR - Pedestrian Dead Reckoning).
- * Работает без GPS, лидаров и ARCore, опираясь исключительно на инерциальные датчики (IMU):
- * - Акселерометр: детекция шагов по пикам динамического ускорения.
- * - Гироскоп: высокочастотная интеграция угловой скорости для отслеживания курса/азимута.
- * - Магнитометр: опциональная долгосрочная коррекция накопленного дрейфа гироскопа.
- *
- * Обработка датчиков вынесена в отдельный HandlerThread с высоким приоритетом,
- * что гарантирует непрерывную работу при заблокированном/выключенном экране.
+ * Модуль автономной навигации PDR (Pedestrian Dead Reckoning),
+ * расчета карты покрытия уборки (Coverage Mapping) и разметки контуров объектов (подъезды, дворы).
  */
 class IndoorTracker(
-    context: Context,
+    private val context: Context,
     private var config: PdrConfig = PdrConfig()
 ) : SensorEventListener {
 
-    private val appContext = context.applicationContext
-    private val sensorManager = appContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-    private val accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-    private val magnetometer = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+    private val sensorManager: SensorManager? =
+        context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
-    // Выделенный фоновый поток для получения прерываний от датчиков ОС при выключенном экране
+    private val accelerometer: Sensor? = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gyroscope: Sensor? = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val magnetometer: Sensor? = sensorManager?.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+    private val trackerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    // Выделенный системный поток для непрерывного опроса датчиков
     private var sensorThread: HandlerThread? = null
     private var sensorHandler: Handler? = null
 
-    // Фоновый скоуп для математических расчётов вне UI-потока
-    private val trackerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-    // Буферизованный канал событий датчиков для быстрой передачи из callback в фоновый поток
     private val sensorEventFlow = MutableSharedFlow<RawSensorData>(
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -65,7 +64,9 @@ class IndoorTracker(
     private val _trackerState = MutableStateFlow(
         TrackerState(
             currentPosition = Position(x = 0.0, y = 0.0, floor = 1),
-            currentStepLength = config.stepLength
+            currentStepLength = config.stepLength,
+            cleaningWidthMeters = 0.5,
+            cleaningMode = CleaningMode.WET_CLEANING
         )
     )
     val trackerState: StateFlow<TrackerState> = _trackerState.asStateFlow()
@@ -78,6 +79,11 @@ class IndoorTracker(
     private var stepCount = 0
     private var totalDistance = 0.0
     private var headingRadians = 0.0 // Курс в радианах (0 = Север / +Y, PI/2 = Восток / +X)
+
+    // Параметры уборочного инвентаря
+    private var cleaningWidthMeters = 0.5
+    private var currentCleaningMode = CleaningMode.WET_CLEANING
+    private var coveredAreaM2 = 0.0
 
     // Гравитационный фильтр (Low-Pass Filter) для выделения вектора тяжести
     private val gravity = FloatArray(3) { 0f }
@@ -101,6 +107,39 @@ class IndoorTracker(
     private var magHeadingRadians = 0.0
 
     init {
+        // Добавляем типовые зоны по умолчанию для быстрого старта клинера
+        val defaultZones = listOf(
+            FacilityZone(
+                id = "zone_entrance_1_fl1",
+                name = "Подъезд 1 • Холл 1 этажа",
+                category = ObjectCategory.ENTRANCE_BUILDING,
+                floor = 1,
+                areaSquareMeters = 36.0,
+                polygonPoints = listOf(
+                    Position(-3.0, -3.0, 1),
+                    Position(3.0, -3.0, 1),
+                    Position(3.0, 3.0, 1),
+                    Position(-3.0, 3.0, 1)
+                ),
+                colorHex = 0xFF0284C7
+            ),
+            FacilityZone(
+                id = "zone_yard_playground",
+                name = "Двор • Детская площадка",
+                category = ObjectCategory.OUTDOOR_YARD,
+                floor = 1,
+                areaSquareMeters = 120.0,
+                polygonPoints = listOf(
+                    Position(5.0, 5.0, 1),
+                    Position(15.0, 5.0, 1),
+                    Position(15.0, 15.0, 1),
+                    Position(5.0, 15.0, 1)
+                ),
+                colorHex = 0xFF10B981
+            )
+        )
+        _trackerState.update { it.copy(savedZones = defaultZones, currentZone = defaultZones.first()) }
+
         // Запуск фоновой обработки данных датчиков
         trackerScope.launch {
             sensorEventFlow.collect { event ->
@@ -115,6 +154,8 @@ class IndoorTracker(
     fun startTracking() {
         if (isTracking) return
         isTracking = true
+
+        isGravityInitialized = false
         lastStepTimestampNs = 0L
         lastGyroTimestampNs = 0L
 
@@ -126,7 +167,6 @@ class IndoorTracker(
             sensorHandler = handler
 
             sensorManager?.let { sm ->
-                // Частота опроса: SENSOR_DELAY_GAME (~20-50 Гц) оптимальна для PDR без перегрузки батареи
                 accelerometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
                 gyroscope?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
                 magnetometer?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, handler) }
@@ -139,12 +179,7 @@ class IndoorTracker(
         _trackerState.update {
             it.copy(
                 isTracking = true,
-                currentPosition = Position(
-                    x = currentX,
-                    y = currentY,
-                    floor = currentFloor,
-                    timestamp = System.currentTimeMillis()
-                )
+                currentStepLength = config.stepLength
             )
         }
     }
@@ -168,6 +203,22 @@ class IndoorTracker(
     }
 
     /**
+     * Смена режима уборки (Влажная, Сухая, Санобработка, Простой)
+     */
+    fun updateCleaningMode(mode: CleaningMode) {
+        currentCleaningMode = mode
+        _trackerState.update { it.copy(cleaningMode = mode) }
+    }
+
+    /**
+     * Смена ширины захвата швабры / насадки пылесоса в метрах
+     */
+    fun updateCleaningWidth(widthMeters: Double) {
+        cleaningWidthMeters = widthMeters.coerceIn(0.2, 2.5)
+        _trackerState.update { it.copy(cleaningWidthMeters = cleaningWidthMeters) }
+    }
+
+    /**
      * Сброс координат в (0,0) или заданную начальную точку.
      */
     fun resetPosition(x: Double = 0.0, y: Double = 0.0, headingDeg: Float = 0f) {
@@ -175,6 +226,7 @@ class IndoorTracker(
         currentY = y
         stepCount = 0
         totalDistance = 0.0
+        coveredAreaM2 = 0.0
         headingRadians = Math.toRadians(headingDeg.toDouble())
 
         val startPos = Position(
@@ -189,8 +241,10 @@ class IndoorTracker(
                 currentPosition = startPos,
                 stepCount = 0,
                 totalDistance = 0.0,
+                coveredAreaM2 = 0.0,
                 headingDegrees = headingDeg,
-                trajectory = listOf(startPos)
+                trajectory = listOf(startPos),
+                coverageSegments = emptyList()
             )
         }
     }
@@ -214,10 +268,142 @@ class IndoorTracker(
         _trackerState.update { it.copy(currentStepLength = newConfig.stepLength) }
     }
 
+    // =========================================================================
+    //  РЕЖИМ РАЗМЕТКИ ПЕРИМЕТРА ОБЪЕКТА (Building Map / Perimeter SLAM)
+    // =========================================================================
+
+    /**
+     * Старт режима разметки периметра для нового объекта (этаж подъезда, двор и т.д.)
+     */
+    fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int = currentFloor) {
+        val startPt = Position(currentX, currentY, floor, System.currentTimeMillis())
+        val newState = PerimeterMappingState(
+            isMapping = true,
+            zoneName = name.ifEmpty { "Объект #${_trackerState.value.savedZones.size + 1}" },
+            category = category,
+            floor = floor,
+            perimeterPoints = listOf(startPt),
+            isClosed = false,
+            computedPerimeterMeters = 0.0,
+            computedAreaMeters = 0.0
+        )
+        _trackerState.update { it.copy(perimeterState = newState) }
+    }
+
+    /**
+     * Добавление контрольной точки / угла в контур объекта
+     */
+    fun addPerimeterPoint(position: Position = _trackerState.value.currentPosition) {
+        val currentPerimeter = _trackerState.value.perimeterState
+        if (!currentPerimeter.isMapping || currentPerimeter.isClosed) return
+
+        val newPoints = currentPerimeter.perimeterPoints + position
+        val perimeterLen = computePerimeterLength(newPoints)
+        val area = computePolygonArea(newPoints)
+
+        val updated = currentPerimeter.copy(
+            perimeterPoints = newPoints,
+            computedPerimeterMeters = perimeterLen,
+            computedAreaMeters = area
+        )
+        _trackerState.update { it.copy(perimeterState = updated) }
+    }
+
+    /**
+     * Замыкание контура и сохранение размеченного объекта в библиотеку зон
+     */
+    fun closePerimeter(): FacilityZone? {
+        val pState = _trackerState.value.perimeterState
+        if (!pState.isMapping || pState.perimeterPoints.size < 3) return null
+
+        val finalPoints = pState.perimeterPoints
+        val finalArea = computePolygonArea(finalPoints).coerceAtLeast(1.0)
+        val zoneColor = when (pState.category) {
+            ObjectCategory.ENTRANCE_BUILDING -> 0xFF0284C7
+            ObjectCategory.OUTDOOR_YARD -> 0xFF10B981
+        }
+
+        val newZone = FacilityZone(
+            id = "zone_${UUID.randomUUID().toString().take(8)}",
+            name = pState.zoneName,
+            category = pState.category,
+            floor = pState.floor,
+            polygonPoints = finalPoints,
+            areaSquareMeters = finalArea,
+            colorHex = zoneColor
+        )
+
+        _trackerState.update { state ->
+            val updatedZones = state.savedZones + newZone
+            state.copy(
+                savedZones = updatedZones,
+                currentZone = newZone,
+                perimeterState = pState.copy(isClosed = true, isMapping = false)
+            )
+        }
+        return newZone
+    }
+
+    /**
+     * Отмена текущей разметки периметра
+     */
+    fun cancelPerimeterMapping() {
+        _trackerState.update { it.copy(perimeterState = PerimeterMappingState()) }
+    }
+
+    /**
+     * Выбор активного объекта/зоны
+     */
+    fun selectActiveZone(zone: FacilityZone?) {
+        _trackerState.update { it.copy(currentZone = zone) }
+    }
+
+    /**
+     * Удаление сохраненного объекта
+     */
+    fun deleteZone(zoneId: String) {
+        _trackerState.update { state ->
+            val filtered = state.savedZones.filterNot { it.id == zoneId }
+            val active = if (state.currentZone?.id == zoneId) filtered.firstOrNull() else state.currentZone
+            state.copy(savedZones = filtered, currentZone = active)
+        }
+    }
+
+    // =========================================================================
+    //  ГЕОМЕТРИЧЕСКИЕ ВЫЧИСЛЕНИЯ ПЛОЩАДИ И ПЕРИМЕТРА (Формула Гаусса)
+    // =========================================================================
+
+    private fun computePolygonArea(points: List<Position>): Double {
+        if (points.size < 3) return 0.0
+        var sum = 0.0
+        val n = points.size
+        for (i in 0 until n) {
+            val j = (i + 1) % n
+            sum += (points[i].x * points[j].y) - (points[j].x * points[i].y)
+        }
+        return abs(sum) / 2.0
+    }
+
+    private fun computePerimeterLength(points: List<Position>): Double {
+        if (points.size < 2) return 0.0
+        var dist = 0.0
+        for (i in 0 until points.size - 1) {
+            val p1 = points[i]
+            val p2 = points[i + 1]
+            val dx = p2.x - p1.x
+            val dy = p2.y - p1.y
+            dist += sqrt(dx * dx + dy * dy)
+        }
+        return dist
+    }
+
+    // =========================================================================
+    //  ОБРАБОТКА ДАТЧИКОВ (SensorEventListener)
+    // =========================================================================
+
     override fun onSensorChanged(event: SensorEvent?) {
         if (!isTracking || event == null) return
 
-        // Быстрая упаковка данных и отправка в Dispatchers.Default без блокировки потока датчиков
         val raw = RawSensorData(
             sensorType = event.sensor.type,
             values = event.values.clone(),
@@ -226,36 +412,16 @@ class IndoorTracker(
         sensorEventFlow.tryEmit(raw)
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // Обработка изменения точности при необходимости
-    }
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    /**
-     * Основной алгоритм PDR, выполняющийся в Dispatchers.Default:
-     * 1. Интеграция гироскопа (курс).
-     * 2. Выделение гравитации и детекция шага (акселерометр).
-     * 3. Смещение координат (Dead Reckoning).
-     */
     private fun processSensorEvent(data: RawSensorData) {
         when (data.sensorType) {
-            Sensor.TYPE_ACCELEROMETER -> {
-                handleAccelerometer(data.values, data.timestampNs)
-            }
-            Sensor.TYPE_GYROSCOPE -> {
-                handleGyroscope(data.values, data.timestampNs)
-            }
-            Sensor.TYPE_MAGNETIC_FIELD -> {
-                handleMagnetometer(data.values)
-            }
+            Sensor.TYPE_ACCELEROMETER -> handleAccelerometer(data.values, data.timestampNs)
+            Sensor.TYPE_GYROSCOPE -> handleGyroscope(data.values, data.timestampNs)
+            Sensor.TYPE_MAGNETIC_FIELD -> handleMagnetometer(data.values)
         }
     }
 
-    /**
-     * Обработка данных акселерометра:
-     * - Вычисление полного модуля ускорения |a| = sqrt(x^2 + y^2 + z^2)
-     * - Низкочастотный фильтр гравитации
-     * - Детекция пиков динамического ускорения (удара стопы о пол) с окном нечувствительности.
-     */
     private fun handleAccelerometer(values: FloatArray, timestampNs: Long) {
         val ax = values[0]
         val ay = values[1]
@@ -266,7 +432,6 @@ class IndoorTracker(
         lastAccelRaw[2] = az
         hasAccel = true
 
-        // Выделение гравитации LPF
         if (!isGravityInitialized) {
             gravity[0] = ax
             gravity[1] = ay
@@ -278,16 +443,13 @@ class IndoorTracker(
             gravity[2] = alphaGravity * gravity[2] + (1 - alphaGravity) * az
         }
 
-        // Динамическое линейное ускорение (без гравитации)
         val linearX = ax - gravity[0]
         val linearY = ay - gravity[1]
         val linearZ = az - gravity[2]
 
-        // Модуль динамического ускорения
         val dynamicAccelMagnitude = sqrt(linearX * linearX + linearY * linearY + linearZ * linearZ)
         val totalMagnitude = sqrt(ax * ax + ay * ay + az * az)
 
-        // Алгоритм поиска пика шага с окном нечувствительности (Dead Time)
         val minIntervalNs = config.stepDeadTimeMs * 1_000_000L
         val timeSinceLastStepNs = timestampNs - lastStepTimestampNs
 
@@ -297,7 +459,6 @@ class IndoorTracker(
                 peakCandidateVal = dynamicAccelMagnitude
             }
         } else if (isPeakCandidate) {
-            // Спал ниже порога после превышения — фиксируем завершённый пик шага
             if (timeSinceLastStepNs >= minIntervalNs) {
                 onStepDetected(timestampNs)
                 lastStepTimestampNs = timestampNs
@@ -307,53 +468,31 @@ class IndoorTracker(
         }
 
         lastAccelMagnitude = totalMagnitude
-
-        // Обновляем текущий модуль ускорения для телеметрии
-        _trackerState.update {
-            it.copy(currentAccelMagnitude = totalMagnitude)
-        }
+        _trackerState.update { it.copy(currentAccelMagnitude = totalMagnitude) }
     }
 
-    /**
-     * Обработка гироскопа:
-     * Интеграция угловой скорости вокруг вертикальной оси Z (yaw) с учётом дельты времени dt.
-     */
     private fun handleGyroscope(values: FloatArray, timestampNs: Long) {
         if (lastGyroTimestampNs != 0L) {
-            val dt = (timestampNs - lastGyroTimestampNs) * 1.0e-9 // секунды
+            val dt = (timestampNs - lastGyroTimestampNs) * 1.0e-9
 
             if (dt in 0.0001..0.5) {
-                // В стандартном положении смартфона в руке/кармане вертикальная ось вращения — Z
-                // Для произвольного наклона учитываем ориентацию устройства относительно гравитации
                 val gz = values[2].toDouble()
-
-                // Интегрируем угловую скорость
                 headingRadians += gz * dt
-
-                // Нормализация угла в диапазон [0, 2*PI)
                 headingRadians = (headingRadians % (2 * PI) + 2 * PI) % (2 * PI)
 
-                // Опциональная мягкая коррекция курса по магнитометру (комплементарный фильтр)
                 if (config.useMagnetometerCorrection && hasMag && hasAccel) {
                     val angleDiff = normalizeAngleDifference(magHeadingRadians - headingRadians)
-                    // Весовой коэффициент коррекции (0.02 = 2% магнитного компаса, 98% гироскопа)
                     headingRadians += 0.02 * angleDiff
                     headingRadians = (headingRadians % (2 * PI) + 2 * PI) % (2 * PI)
                 }
 
                 val headingDegrees = Math.toDegrees(headingRadians).toFloat()
-
-                _trackerState.update {
-                    it.copy(headingDegrees = headingDegrees)
-                }
+                _trackerState.update { it.copy(headingDegrees = headingDegrees) }
             }
         }
         lastGyroTimestampNs = timestampNs
     }
 
-    /**
-     * Обработка магнитометра для расчёта абсолютного магнитного азимута.
-     */
     private fun handleMagnetometer(values: FloatArray) {
         lastMagRaw[0] = values[0]
         lastMagRaw[1] = values[1]
@@ -373,25 +512,19 @@ class IndoorTracker(
             if (success) {
                 val orientation = FloatArray(3)
                 SensorManager.getOrientation(rotationMatrix, orientation)
-                // orientation[0] — азимут (угол относительно магнитного севера в радианах)
                 val rawAzimuth = orientation[0].toDouble()
                 magHeadingRadians = (rawAzimuth + 2 * PI) % (2 * PI)
             }
         }
     }
 
-    /**
-     * Вызывается при подтверждённом шаге:
-     * Расчёт новых координат:
-     * dx = stepLength * sin(heading)
-     * dy = stepLength * cos(heading)
-     */
     private fun onStepDetected(timestampNs: Long) {
+        val prevPos = Position(currentX, currentY, currentFloor, System.currentTimeMillis())
+
         stepCount++
         val stepLen = config.stepLength
         totalDistance += stepLen
 
-        // По направлению курса: 0 рад = Север (+Y), PI/2 рад = Восток (+X)
         val dx = stepLen * sin(headingRadians)
         val dy = stepLen * cos(headingRadians)
 
@@ -405,43 +538,89 @@ class IndoorTracker(
             timestamp = System.currentTimeMillis()
         )
 
+        // Добавляем сегмент полосы покрытия уборки
+        val segment = CoverageSegment(
+            start = prevPos,
+            end = newPos,
+            cleaningWidthMeters = cleaningWidthMeters,
+            mode = currentCleaningMode,
+            timestamp = System.currentTimeMillis()
+        )
+
+        // Площадь уборки (м²): при активной уборке увеличиваем на (длина шага * ширина насадки)
+        if (currentCleaningMode != CleaningMode.IDLE_TRANSIT) {
+            coveredAreaM2 += stepLen * cleaningWidthMeters
+        }
+
         _trackerState.update { state ->
-            val updatedTrajectory = (state.trajectory + newPos).takeLast(500) // Ограничиваем историю для производительности
+            val updatedTrajectory = (state.trajectory + newPos).takeLast(500)
+            val updatedSegments = (state.coverageSegments + segment).takeLast(500)
+
+            // Если включен режим разметки периметра, также автоматически добавляем точки в периметр
+            val updatedPerimeter = if (state.perimeterState.isMapping && !state.perimeterState.isClosed) {
+                val pPoints = state.perimeterState.perimeterPoints + newPos
+                state.perimeterState.copy(
+                    perimeterPoints = pPoints,
+                    computedPerimeterMeters = computePerimeterLength(pPoints),
+                    computedAreaMeters = computePolygonArea(pPoints)
+                )
+            } else {
+                state.perimeterState
+            }
+
             state.copy(
                 currentPosition = newPos,
                 stepCount = stepCount,
                 totalDistance = totalDistance,
+                coveredAreaM2 = coveredAreaM2,
                 headingDegrees = Math.toDegrees(headingRadians).toFloat(),
-                trajectory = updatedTrajectory
+                trajectory = updatedTrajectory,
+                coverageSegments = updatedSegments,
+                perimeterState = updatedPerimeter
             )
         }
     }
 
     /**
-     * Симуляция шага для тестирования траектории
+     * Симуляция шага для тестирования полосы покрытия и траектории
      */
     fun simulateStep(pos: Position, headingDeg: Float, newStepCount: Int) {
+        val prevPos = Position(currentX, currentY, currentFloor, System.currentTimeMillis())
+
         currentX = pos.x
         currentY = pos.y
         stepCount = newStepCount
-        totalDistance = newStepCount * config.stepLength
+        val stepLen = config.stepLength
+        totalDistance = newStepCount * stepLen
         headingRadians = Math.toRadians(headingDeg.toDouble())
+
+        if (currentCleaningMode != CleaningMode.IDLE_TRANSIT) {
+            coveredAreaM2 += stepLen * cleaningWidthMeters
+        }
+
+        val segment = CoverageSegment(
+            start = prevPos,
+            end = pos,
+            cleaningWidthMeters = cleaningWidthMeters,
+            mode = currentCleaningMode,
+            timestamp = System.currentTimeMillis()
+        )
 
         _trackerState.update { state ->
             val updatedTrajectory = (state.trajectory + pos).takeLast(500)
+            val updatedSegments = (state.coverageSegments + segment).takeLast(500)
             state.copy(
                 currentPosition = pos,
                 stepCount = stepCount,
                 totalDistance = totalDistance,
+                coveredAreaM2 = coveredAreaM2,
                 headingDegrees = headingDeg,
-                trajectory = updatedTrajectory
+                trajectory = updatedTrajectory,
+                coverageSegments = updatedSegments
             )
         }
     }
 
-    /**
-     * Нормализация разницы двух углов в диапазон [-PI, PI]
-     */
     private fun normalizeAngleDifference(diff: Double): Double {
         var d = diff % (2 * PI)
         if (d > PI) d -= 2 * PI
@@ -449,9 +628,6 @@ class IndoorTracker(
         return d
     }
 
-    /**
-     * Пакет сырых данных датчика.
-     */
     private data class RawSensorData(
         val sensorType: Int,
         val values: FloatArray,

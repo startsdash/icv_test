@@ -6,7 +6,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.example.manager.TrackingManager
+import com.example.model.CleaningMode
 import com.example.model.ConnectionState
+import com.example.model.FacilityZone
+import com.example.model.ObjectCategory
 import com.example.model.PdrConfig
 import com.example.model.ServerMapConfig
 import com.example.model.TrackerState
@@ -16,7 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 /**
  * ViewModel для управления UI приложения клинера:
- * Делегирует управление трекингом и сокетом в фоно-устойчивый синглтон TrackingManager.
+ * Делегирует управление трекингом, картографией покрытия и сокетом в синглтон TrackingManager.
  */
 class CleanerTrackerViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -73,6 +76,38 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
 
     fun updateStepThreshold(newThreshold: Float) {
         trackingManager.updateStepThreshold(newThreshold)
+    }
+
+    fun updateCleaningMode(mode: CleaningMode) {
+        trackingManager.updateCleaningMode(mode)
+    }
+
+    fun updateCleaningWidth(widthMeters: Double) {
+        trackingManager.updateCleaningWidth(widthMeters)
+    }
+
+    fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int) {
+        trackingManager.startPerimeterMapping(name, category, floor)
+    }
+
+    fun addPerimeterPoint() {
+        trackingManager.addPerimeterPoint()
+    }
+
+    fun closePerimeter() {
+        trackingManager.closePerimeter()
+    }
+
+    fun cancelPerimeterMapping() {
+        trackingManager.cancelPerimeterMapping()
+    }
+
+    fun selectActiveZone(zone: FacilityZone?) {
+        trackingManager.selectActiveZone(zone)
+    }
+
+    fun deleteZone(zoneId: String) {
+        trackingManager.deleteZone(zoneId)
     }
 
     fun reconnectSocket() {

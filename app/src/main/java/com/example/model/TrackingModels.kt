@@ -1,7 +1,9 @@
 package com.example.model
 
 /**
- * Модели данных для системы трекинга внутри помещений (PDR) и Socket.io обмена.
+ * Модели данных для системы трекинга внутри помещений (PDR),
+ * покрытия зон уборки (Coverage Mapping), разметки периметров объектов (подъезды, дворы)
+ * и Socket.io обмена с сервером.
  */
 
 /**
@@ -23,6 +25,24 @@ sealed class ConnectionState {
 }
 
 /**
+ * Режимы работы клинера
+ */
+enum class CleaningMode(val title: String, val shortName: String, val iconEmoji: String, val colorHex: Long) {
+    WET_CLEANING("Влажная уборка", "Влажная", "💧", 0xFF0284C7),
+    DRY_VACUUM("Сухая уборка / Пылесос", "Сухая", "🧹", 0xFFF59E0B),
+    DISINFECTION("Санобработка / Дезинфекция", "Санобработка", "🛡️", 0xFF10B981),
+    IDLE_TRANSIT("Переход / Простой", "Простой", "🚶", 0xFF6B7280)
+}
+
+/**
+ * Категория объекта уборки
+ */
+enum class ObjectCategory(val title: String, val emoji: String) {
+    ENTRANCE_BUILDING("Подъезд", "🏢"),
+    OUTDOOR_YARD("Придомовая территория", "🌳")
+}
+
+/**
  * Локальная точка позиции клинера.
  * @property x Координата X в метрах относительно точки старта (0,0) (восток/право)
  * @property y Координата Y в метрах относительно точки старта (0,0) (север/вперёд)
@@ -37,6 +57,45 @@ data class Position(
 )
 
 /**
+ * Пройденный отрезок уборки с шириной захвата (полоса покрытия).
+ */
+data class CoverageSegment(
+    val start: Position,
+    val end: Position,
+    val cleaningWidthMeters: Double = 0.5,
+    val mode: CleaningMode = CleaningMode.WET_CLEANING,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+/**
+ * Размеченный объект/зона (этаж подъезда, холл, придомовая площадка, дорожка и т.д.).
+ */
+data class FacilityZone(
+    val id: String,
+    val name: String,
+    val category: ObjectCategory,
+    val floor: Int = 1,
+    val polygonPoints: List<Position> = emptyList(),
+    val areaSquareMeters: Double = 0.0,
+    val targetCoveragePercent: Double = 100.0,
+    val colorHex: Long = 0xFF3B82F6
+)
+
+/**
+ * Состояние текущей разметки периметра объекта.
+ */
+data class PerimeterMappingState(
+    val isMapping: Boolean = false,
+    val zoneName: String = "",
+    val category: ObjectCategory = ObjectCategory.ENTRANCE_BUILDING,
+    val floor: Int = 1,
+    val perimeterPoints: List<Position> = emptyList(),
+    val isClosed: Boolean = false,
+    val computedPerimeterMeters: Double = 0.0,
+    val computedAreaMeters: Double = 0.0
+)
+
+/**
  * Позиция другого пользователя из снапшота "map_update" от сервера.
  */
 data class UserPosition(
@@ -48,17 +107,7 @@ data class UserPosition(
 )
 
 /**
- * Общее состояние PDR-трекера для UI.
- * @property isTracking Флаг активной уборки/записи трека
- * @property currentPosition Текущие координаты
- * @property stepCount Количество зафиксированных шагов
- * @property totalDistance Пройденная дистанция в метрах
- * @property headingDegrees Текущий азимут/курс в градусах (0..360)
- * @property currentStepLength Длина одного шага в метрах
- * @property trajectory История пройденных точек для отрисовки траектории
- * @property currentAccelMagnitude Текущий модуль ускорения (для отладки)
- * @property packetsSentCount Количество успешно отправленных пакетов
- * @property lastSentTimestamp Время последней отправки на сервер
+ * Общее состояние PDR-трекера и зоны уборки для UI.
  */
 data class TrackerState(
     val isTracking: Boolean = false,
@@ -68,6 +117,13 @@ data class TrackerState(
     val headingDegrees: Float = 0f,
     val currentStepLength: Double = 0.7,
     val trajectory: List<Position> = emptyList(),
+    val coverageSegments: List<CoverageSegment> = emptyList(),
+    val cleaningWidthMeters: Double = 0.5, // 50 см ширина швабры / насадки
+    val cleaningMode: CleaningMode = CleaningMode.WET_CLEANING,
+    val coveredAreaM2: Double = 0.0,
+    val currentZone: FacilityZone? = null,
+    val savedZones: List<FacilityZone> = emptyList(),
+    val perimeterState: PerimeterMappingState = PerimeterMappingState(),
     val currentAccelMagnitude: Float = 0f,
     val packetsSentCount: Long = 0L,
     val lastSentTimestamp: Long = 0L
@@ -75,10 +131,6 @@ data class TrackerState(
 
 /**
  * Параметры калибровки алгоритма PDR (Pedestrian Dead Reckoning).
- * @property stepLength Длина шага по умолчанию в метрах (~0.7 м)
- * @property stepThreshold Порог пика динамического ускорения (м/с²) для детекции шага
- * @property stepDeadTimeMs Минимальное окно нечувствительности между шагами (мс)
- * @property useMagnetometerCorrection Использовать ли магнитометр для коррекции курса гироскопа
  */
 data class PdrConfig(
     val stepLength: Double = 0.7,
@@ -89,10 +141,6 @@ data class PdrConfig(
 
 /**
  * Конфигурация привязки к серверной карте (800x600 пикселей).
- * @property originX Начальная координата X на карте (по умолчанию 400.0 - центр)
- * @property originY Начальная координата Y на карте (по умолчанию 300.0 - центр)
- * @property pixelsPerMeter Масштаб: сколько пикселей карты приходится на 1 метр перемещения
- * @property cleanerName Имя клинера, отображаемое на веб-сайте
  */
 data class ServerMapConfig(
     val originX: Double = 400.0,
@@ -100,4 +148,3 @@ data class ServerMapConfig(
     val pixelsPerMeter: Double = 20.0,
     val cleanerName: String = ""
 )
-

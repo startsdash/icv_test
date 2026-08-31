@@ -43,6 +43,8 @@ class SocketService(private val context: Context) {
         // Имена событий протокола Socket.io
         const val EVENT_POSITION_UPDATE = "position_update"
         const val EVENT_MAP_UPDATE = "map_update"
+        const val EVENT_PERIMETER_UPDATE = "perimeter_update"
+        const val EVENT_ZONE_UPDATE = "zone_update"
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -156,11 +158,27 @@ class SocketService(private val context: Context) {
     }
 
     /**
-     * Отправка текущей позиции клинера на backend:
+     * Отправка текущей позиции клинера и параметров покрытия на backend:
      * Событие: "position_update"
-     * Payload: { "userId": "string", "id": "string", "name": "string", "x": number, "y": number, "floor": number, "timestamp": long }
+     * Payload: { 
+     *   "userId": "string", "id": "string", "name": "string",
+     *   "x": number, "y": number, "floor": number, "timestamp": long,
+     *   "cleaningWidth": number, "brushRadius": number, "mode": string, "modeName": string,
+     *   "coveredAreaM2": number, "heading": number, "zoneName": string
+     * }
      */
-    fun sendPosition(x: Double, y: Double, floor: Int, customName: String? = null) {
+    fun sendPosition(
+        x: Double,
+        y: Double,
+        floor: Int,
+        customName: String? = null,
+        cleaningWidthMeters: Double = 0.5,
+        cleaningModeName: String = "WET_CLEANING",
+        cleaningModeTitle: String = "Влажная уборка",
+        coveredAreaM2: Double = 0.0,
+        headingDegrees: Float = 0f,
+        zoneName: String = ""
+    ) {
         val s = socket
         if (s == null || !s.connected()) {
             Log.w(TAG, "Cannot send position: Socket is not connected (state=${_connectionState.value})")
@@ -179,14 +197,69 @@ class SocketService(private val context: Context) {
                     put("y", y)
                     put("floor", floor)
                     put("timestamp", now)
+                    // Расширенные данные покрытия и уборочного инвентаря
+                    put("cleaningWidth", cleaningWidthMeters)
+                    put("brushRadius", cleaningWidthMeters / 2.0)
+                    put("mode", cleaningModeName)
+                    put("modeName", cleaningModeTitle)
+                    put("coveredAreaM2", coveredAreaM2)
+                    put("heading", headingDegrees)
+                    if (zoneName.isNotEmpty()) {
+                        put("zoneName", zoneName)
+                    }
                 }
 
                 s.emit(EVENT_POSITION_UPDATE, payload)
                 _lastSentTimestamp.value = now
                 _packetsSentCount.value += 1
-                Log.d(TAG, "Sent position: name=$displayName (x=%.2f, y=%.2f, floor=%d)".format(x, y, floor))
+                Log.d(TAG, "Sent position: name=$displayName (x=%.2f, y=%.2f, mode=$cleaningModeName, width=%.2fm)".format(x, y))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to emit position_update: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Отправка размеченного периметра объекта (этаж подъезда, двор, площадка) на сервер:
+     * Событие: "perimeter_update"
+     */
+    fun sendZonePerimeter(
+        zoneId: String,
+        zoneName: String,
+        category: String,
+        floor: Int,
+        points: List<Pair<Double, Double>>,
+        areaM2: Double
+    ) {
+        val s = socket
+        if (s == null || !s.connected()) return
+
+        scope.launch {
+            try {
+                val pointsArray = JSONArray()
+                points.forEach { (px, py) ->
+                    pointsArray.put(JSONObject().apply {
+                        put("x", px)
+                        put("y", py)
+                    })
+                }
+
+                val payload = JSONObject().apply {
+                    put("userId", userId)
+                    put("zoneId", zoneId)
+                    put("zoneName", zoneName)
+                    put("category", category)
+                    put("floor", floor)
+                    put("points", pointsArray)
+                    put("areaM2", areaM2)
+                    put("timestamp", System.currentTimeMillis())
+                }
+
+                s.emit(EVENT_PERIMETER_UPDATE, payload)
+                s.emit(EVENT_ZONE_UPDATE, payload)
+                Log.i(TAG, "Sent zone perimeter: $zoneName with ${points.size} points, area=%.2f m²".format(areaM2))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send perimeter update: ${e.message}", e)
             }
         }
     }

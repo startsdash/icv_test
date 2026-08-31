@@ -17,6 +17,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,32 +34,38 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DirectionsWalk
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Domain
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Park
 import androidx.compose.material.icons.filled.PauseCircle
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Polyline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -72,6 +79,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -92,7 +100,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.model.CleaningMode
 import com.example.model.ConnectionState
+import com.example.model.FacilityZone
+import com.example.model.ObjectCategory
 import com.example.model.PdrConfig
 import com.example.model.Position
 import com.example.model.ServerMapConfig
@@ -134,7 +145,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Главный экран приложения трекинга клинеров в стиле Clean Minimalism.
+ * Главный экран приложения трекинга клинеров с концепцией SLAM и Coverage Mapping (как у роботов-пылесосов).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -150,6 +161,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
 
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showLogsDialog by remember { mutableStateOf(false) }
+    var showZonesSheet by remember { mutableStateOf(false) }
 
     // Запрос необходимых разрешений
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -176,7 +188,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
         }
     }
 
-    // Управление фоновым сервисом для непрерывной работы при переключении в браузер
+    // Управление фоновым сервисом для непрерывной работы при выключенном экране и переключении в браузер
     LaunchedEffect(uiState.trackerState.isTracking, isSimulating) {
         if (uiState.trackerState.isTracking || isSimulating) {
             TrackingForegroundService.start(context)
@@ -195,10 +207,10 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // 1. Верхняя панель: Indoor Track v1.0, Cleaner Console, Socket status, ID
+            // 1. Верхняя панель: Indoor Track v2.0 SLAM, Cleaner Console, Socket status, ID
             CleanHeaderBar(
                 userId = uiState.userId,
                 cleanerName = uiState.cleanerName,
@@ -207,35 +219,70 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
                 onOpenSettings = { showSettingsSheet = true }
             )
 
-            // 2. Основная карточка текущего положения (Current Position)
-            CleanPositionCard(
+            // 2. Селектор активного объекта (Подъезд / Двор) и режимов уборочного инвентаря
+            CleanObjectAndModePill(
+                currentZone = uiState.trackerState.currentZone,
+                activeMode = uiState.trackerState.cleaningMode,
+                cleaningWidthMeters = uiState.trackerState.cleaningWidthMeters,
+                onOpenZonePicker = { showZonesSheet = true },
+                onSelectMode = { viewModel.updateCleaningMode(it) },
+                onSelectWidth = { viewModel.updateCleaningWidth(it) }
+            )
+
+            // 3. Основная карточка текущего положения и метрик покрытия
+            CleanPositionAndCoverageCard(
                 uiState = uiState,
                 onFloorChange = { newFloor -> viewModel.setFloor(newFloor) },
                 onReset = { viewModel.resetPosition(0.0, 0.0, 0f) }
             )
 
-            // 3. IMU Diagnostics & 2D Карта-холст
+            // 4. IMU Diagnostics & 2D Карта-холст покрытия (SLAM Coverage Map)
             CleanDiagnosticsAndMapCard(
                 uiState = uiState,
                 otherUsers = otherUsers,
+                onAddPerimeterPoint = { viewModel.addPerimeterPoint() },
+                onClosePerimeter = { viewModel.closePerimeter() },
+                onCancelPerimeter = { viewModel.cancelPerimeterMapping() },
                 modifier = Modifier.weight(1f)
             )
 
-            // 4. Карточка активной сессии (Dark Summary Pill)
+            // 5. Карточка активной сессии (Dark Summary Pill)
             CleanActiveSessionCard(
                 isTracking = uiState.trackerState.isTracking,
                 durationSeconds = sessionDuration,
-                packetsCount = uiState.trackerState.packetsSentCount
+                packetsCount = uiState.trackerState.packetsSentCount,
+                coveredAreaM2 = uiState.trackerState.coveredAreaM2
             )
 
-            // 5. Нижняя панель действий (Завершить/Начать уборку + Симуляция + Логи + Настройки)
+            // 6. Нижняя панель действий (Завершить/Начать уборку + Разметка + Симуляция + Логи + Настройки)
             CleanBottomControlSection(
                 isTracking = uiState.trackerState.isTracking,
                 isSimulating = isSimulating,
+                isPerimeterMapping = uiState.trackerState.perimeterState.isMapping,
                 onToggleCleaning = { viewModel.toggleCleaningSession() },
+                onOpenZonesSheet = { showZonesSheet = true },
                 onToggleSimulation = { viewModel.toggleSimulation() },
                 onOpenLogs = { showLogsDialog = true },
                 onOpenSettings = { showSettingsSheet = true }
+            )
+        }
+
+        // Шторка объектов и разметки периметра
+        if (showZonesSheet) {
+            ZonesAndPerimeterBottomSheet(
+                savedZones = uiState.trackerState.savedZones,
+                currentZone = uiState.trackerState.currentZone,
+                isPerimeterMapping = uiState.trackerState.perimeterState.isMapping,
+                onDismiss = { showZonesSheet = false },
+                onSelectZone = {
+                    viewModel.selectActiveZone(it)
+                    showZonesSheet = false
+                },
+                onStartNewPerimeter = { name, category, floor ->
+                    viewModel.startPerimeterMapping(name, category, floor)
+                    showZonesSheet = false
+                },
+                onDeleteZone = { viewModel.deleteZone(it) }
             )
         }
 
@@ -269,7 +316,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
 }
 
 /**
- * Верхняя строка: Indoor Track v1.0, Заголовок, статус wss://icv.dotozen.ru и ID клинера.
+ * Верхняя строка: Indoor Track v2.0, Статус сокета и ID клинера.
  */
 @Composable
 fun CleanHeaderBar(
@@ -288,15 +335,15 @@ fun CleanHeaderBar(
     ) {
         Column {
             Text(
-                text = "INDOOR TRACK v1.0",
-                fontSize = 11.sp,
+                text = "INDOOR TRACK • SLAM COVERAGE",
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = PrimaryBlue,
                 letterSpacing = 1.sp
             )
             Text(
                 text = cleanerName.ifEmpty { "Cleaner Console" },
-                fontSize = 20.sp,
+                fontSize = 19.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = TextPrimary
             )
@@ -306,7 +353,6 @@ fun CleanHeaderBar(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            // Сокет статус с зеленой пульсирующей точкой
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -346,150 +392,141 @@ fun CleanHeaderBar(
 }
 
 /**
- * Карточка текущего положения (Current Position) с координатами X, Y и переключателем этажей.
+ * Плашка выбора объекта (Подъезд, этаж, двор) и переключения режима/ширины уборочного инвентаря.
  */
 @Composable
-fun CleanPositionCard(
-    uiState: TrackerUiState,
-    onFloorChange: (Int) -> Unit,
-    onReset: () -> Unit
+fun CleanObjectAndModePill(
+    currentZone: FacilityZone?,
+    activeMode: CleaningMode,
+    cleaningWidthMeters: Double,
+    onOpenZonePicker: () -> Unit,
+    onSelectMode: (CleaningMode) -> Unit,
+    onSelectWidth: (Double) -> Unit
 ) {
-    val pos = uiState.trackerState.currentPosition
-
     Card(
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = CleanSurface),
         border = BorderStroke(1.dp, CleanBorder),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("status_card")
+        modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Верхняя плашка карточки: иконка локации + этаж / зона
+            // Строка 1: Текущий объект (Подъезд/Двор)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onOpenZonePicker() }
+                    .background(CleanChipBg)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(PrimaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = null,
-                        tint = PrimaryBlue,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(horizontalAlignment = Alignment.End) {
+                    val icon = if (currentZone?.category == ObjectCategory.OUTDOOR_YARD) Icons.Default.Park else Icons.Default.Domain
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = PrimaryBlue,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Column {
                         Text(
-                            text = "CURRENT POSITION",
-                            fontSize = 10.sp,
+                            text = "ОБЪЕКТ УБОРКИ",
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
-                            color = TextSecondary,
-                            letterSpacing = 0.5.sp
+                            color = TextSecondary
                         )
                         Text(
-                            text = "Этаж %d • Сайт [0..800, 0..600]".format(pos.floor),
-                            fontSize = 12.sp,
+                            text = currentZone?.let { "${it.name} (${it.areaSquareMeters.toInt()} м²)" } ?: "Объект не выбран",
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = PrimaryBlue
+                            color = TextPrimary
                         )
                     }
+                }
 
-                    // Компактные кнопки переключения этажа
+                Surface(
+                    color = PrimaryContainer,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "Сменить / Разметить",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = OnPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Строка 2: Режимы инвентаря клинера (Влажная, Сухая, Санобработка, Простой)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CleaningMode.values().forEach { mode ->
+                    val isSelected = mode == activeMode
+                    val chipBg = if (isSelected) PrimaryBlue else CleanChipBg
+                    val contentColor = if (isSelected) Color.White else TextPrimary
+
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
-                            .background(CleanChipBg)
-                            .padding(2.dp)
+                            .background(chipBg)
+                            .clickable { onSelectMode(mode) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        IconButton(
-                            onClick = { onFloorChange(pos.floor - 1) },
-                            modifier = Modifier.size(26.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Remove,
-                                contentDescription = "Этаж вниз",
-                                modifier = Modifier.size(12.dp),
-                                tint = TextPrimary
-                            )
-                        }
-                        IconButton(
-                            onClick = { onFloorChange(pos.floor + 1) },
-                            modifier = Modifier.size(26.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Этаж вверх",
-                                modifier = Modifier.size(12.dp),
-                                tint = TextPrimary
-                            )
-                        }
+                        Text(text = mode.iconEmoji, fontSize = 12.sp)
+                        Text(
+                            text = mode.shortName,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = contentColor
+                        )
                     }
                 }
             }
 
-            // Сетка 2 колонок для координат X и Y
+            // Строка 3: Ширина захвата инвентаря (Швабра/Пылесос 40 см - 100 см)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // X-Coordinate
-                CleanCoordinateBox(
-                    label = "X (МЕТРЫ)",
-                    value = "%.2f".format(pos.x),
-                    subLabel = "Web: %.0f px".format(uiState.serverX),
-                    modifier = Modifier.weight(1f)
+                Text(
+                    text = "Ширина захвата:",
+                    fontSize = 11.sp,
+                    color = TextSecondary
                 )
 
-                // Y-Coordinate
-                CleanCoordinateBox(
-                    label = "Y (МЕТРЫ)",
-                    value = "%.2f".format(pos.y),
-                    subLabel = "Web: %.0f px".format(uiState.serverY),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            if (uiState.isSimulating) {
-                Surface(
-                    color = PrimaryContainer,
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(0.4, 0.5, 0.6, 0.8, 1.0).forEach { width ->
+                        val isSelected = (cleaningWidthMeters == width)
                         Box(
                             modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(PrimaryBlue)
-                        )
-                        Text(
-                            text = "Активна симуляция шагов: маркер перемещается на сайте",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = OnPrimaryContainer
-                        )
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) PrimaryContainer else CleanChipBg)
+                                .clickable { onSelectWidth(width) }
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "%.0fсм".format(width * 100),
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) PrimaryBlue else TextPrimary
+                            )
+                        }
                     }
                 }
             }
@@ -497,54 +534,183 @@ fun CleanPositionCard(
     }
 }
 
+/**
+ * Карточка текущего положения и метрик покрытия (Coverage %).
+ */
 @Composable
-fun CleanCoordinateBox(
+fun CleanPositionAndCoverageCard(
+    uiState: TrackerUiState,
+    onFloorChange: (Int) -> Unit,
+    onReset: () -> Unit
+) {
+    val pos = uiState.trackerState.currentPosition
+    val currentZone = uiState.trackerState.currentZone
+    val coveredArea = uiState.trackerState.coveredAreaM2
+
+    val coveragePercent = if (currentZone != null && currentZone.areaSquareMeters > 0) {
+        ((coveredArea / currentZone.areaSquareMeters) * 100.0).coerceIn(0.0, 100.0)
+    } else {
+        0.0
+    }
+
+    Card(
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = CleanSurface),
+        border = BorderStroke(1.dp, CleanBorder),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("status_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Верхний ряд: локация, этаж
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(PrimaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    Column {
+                        Text(
+                            text = "ПОЗИЦИЯ & ПОКРЫТИЕ",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary,
+                            letterSpacing = 0.5.sp
+                        )
+                        Text(
+                            text = "Этаж %d • Сайт [800×600 px]".format(pos.floor),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = PrimaryBlue
+                        )
+                    }
+                }
+
+                // Кнопки этажа
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(CleanChipBg)
+                        .padding(2.dp)
+                ) {
+                    IconButton(
+                        onClick = { onFloorChange(pos.floor - 1) },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Remove,
+                            contentDescription = "Этаж вниз",
+                            modifier = Modifier.size(12.dp),
+                            tint = TextPrimary
+                        )
+                    }
+                    Text(
+                        text = "эт. ${pos.floor}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                    IconButton(
+                        onClick = { onFloorChange(pos.floor + 1) },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Этаж вверх",
+                            modifier = Modifier.size(12.dp),
+                            tint = TextPrimary
+                        )
+                    }
+                }
+            }
+
+            // Метрики: X, Y, Убрано м², Покрытие %
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CleanMetricBox(
+                    label = "X (МЕТРЫ)",
+                    value = "%.2f".format(pos.x),
+                    subLabel = "Web: %.0f px".format(uiState.serverX),
+                    modifier = Modifier.weight(1f)
+                )
+                CleanMetricBox(
+                    label = "Y (МЕТРЫ)",
+                    value = "%.2f".format(pos.y),
+                    subLabel = "Web: %.0f px".format(uiState.serverY),
+                    modifier = Modifier.weight(1f)
+                )
+                CleanMetricBox(
+                    label = "УБРАНО",
+                    value = "%.1f".format(coveredArea),
+                    subLabel = if (currentZone != null) "%.0f%% зоны".format(coveragePercent) else "м²",
+                    modifier = Modifier.weight(1f),
+                    accent = true
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CleanMetricBox(
     label: String,
     value: String,
     subLabel: String = "",
+    accent: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(CleanChipBg)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (accent) PrimaryContainer.copy(alpha = 0.5f) else CleanChipBg)
+            .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
         Column {
             Text(
                 text = label,
-                fontSize = 10.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.Bold,
-                color = TextSecondary,
-                letterSpacing = 0.5.sp
+                color = if (accent) PrimaryBlue else TextSecondary
             )
-            Spacer(modifier = Modifier.height(2.dp))
-            Row(
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                Text(
-                    text = value,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Light,
-                    color = TextPrimary,
-                    fontFamily = FontFamily.SansSerif,
-                    letterSpacing = (-0.5).sp
-                )
-                Text(
-                    text = "m",
-                    fontSize = 13.sp,
-                    color = TextSecondary.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(bottom = 3.dp)
-                )
-            }
+            Spacer(modifier = Modifier.height(1.dp))
+            Text(
+                text = value,
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Light,
+                color = TextPrimary
+            )
             if (subLabel.isNotEmpty()) {
                 Text(
                     text = subLabel,
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
-                    color = PrimaryBlue,
-                    modifier = Modifier.padding(top = 2.dp)
+                    color = if (accent) PrimaryBlue else TextMuted
                 )
             }
         }
@@ -552,18 +718,22 @@ fun CleanCoordinateBox(
 }
 
 /**
- * IMU Diagnostics & 2D Indoor Map Container.
+ * IMU Diagnostics & 2D Coverage SLAM Canvas Container.
  */
 @Composable
 fun CleanDiagnosticsAndMapCard(
     uiState: TrackerUiState,
     otherUsers: List<com.example.model.UserPosition>,
+    onAddPerimeterPoint: () -> Unit,
+    onClosePerimeter: () -> Unit,
+    onCancelPerimeter: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state = uiState.trackerState
+    val perimeter = state.perimeterState
 
     Card(
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = CleanSurface),
         border = BorderStroke(1.dp, CleanBorder),
         modifier = modifier.fillMaxWidth()
@@ -571,8 +741,8 @@ fun CleanDiagnosticsAndMapCard(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             // Diagnostics Header Bar
             Row(
@@ -581,53 +751,34 @@ fun CleanDiagnosticsAndMapCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "IMU DIAGNOSTICS (PDR)",
-                    fontSize = 11.sp,
+                    text = "SLAM COVERAGE MAP",
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary,
                     letterSpacing = 0.5.sp
                 )
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFFE8F0FE))
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = if (state.isTracking) "ACTIVE" else "STANDBY",
+                        text = "Шагов: ${state.stepCount} • %.1f м".format(state.totalDistance),
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = if (state.isTracking) PrimaryBlue else TextSecondary
+                        fontWeight = FontWeight.Medium,
+                        color = TextMuted
                     )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (state.isTracking) PrimaryContainer else CleanChipBg)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = if (state.isTracking) "УБОРКА" else "ОЖИДАНИЕ",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (state.isTracking) PrimaryBlue else TextSecondary
+                        )
+                    }
                 }
-            }
-
-            // Metrics subrow
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Steps: ${state.stepCount}",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = TextMuted
-                )
-                Text(
-                    text = "Dist: %.1f m".format(state.totalDistance),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = TextMuted
-                )
-                Text(
-                    text = "Heading: %.1f°".format(state.headingDegrees),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = TextMuted
-                )
             }
 
             // 2D Map Canvas
@@ -640,22 +791,96 @@ fun CleanDiagnosticsAndMapCard(
                     currentPosition = state.currentPosition,
                     headingDegrees = state.headingDegrees,
                     trajectory = state.trajectory,
+                    coverageSegments = state.coverageSegments,
+                    savedZones = state.savedZones,
+                    currentZone = state.currentZone,
+                    perimeterState = state.perimeterState,
+                    cleaningWidthMeters = state.cleaningWidthMeters,
+                    cleaningMode = state.cleaningMode,
                     otherUsers = otherUsers,
                     modifier = Modifier.fillMaxSize()
                 )
+
+                // Плашка управления активной разметкой периметра (Perimeter SLAM Controls)
+                if (perimeter.isMapping) {
+                    Surface(
+                        color = Color(0xFF1E293B).copy(alpha = 0.95f),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                            .fillMaxWidth(0.94f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = "РАЗМЕТКА КОНТУРА",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF94A3B8)
+                                )
+                                Text(
+                                    text = "Точек: ${perimeter.perimeterPoints.size} (S: %.1f м²)".format(perimeter.computedAreaMeters),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedButton(
+                                    onClick = onAddPerimeterPoint,
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("+ Угол", fontSize = 11.sp)
+                                }
+
+                                Button(
+                                    onClick = onClosePerimeter,
+                                    enabled = perimeter.perimeterPoints.size >= 3,
+                                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Замкнуть", fontSize = 11.sp)
+                                }
+
+                                IconButton(
+                                    onClick = onCancelPerimeter,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "Отмена", tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 /**
- * Карточка активной сессии (Dark Summary Pill) в стиле Clean Minimalism.
+ * Карточка активной сессии (Dark Summary Pill) с площадью уборки.
  */
 @Composable
 fun CleanActiveSessionCard(
     isTracking: Boolean,
     durationSeconds: Long,
-    packetsCount: Long
+    packetsCount: Long,
+    coveredAreaM2: Double
 ) {
     val hours = durationSeconds / 3600
     val minutes = (durationSeconds % 3600) / 60
@@ -665,9 +890,9 @@ fun CleanActiveSessionCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(CleanDarkCard)
-            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -676,11 +901,11 @@ fun CleanActiveSessionCard(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .background(AccentGreen.copy(alpha = 0.2f)),
                     contentAlignment = Alignment.Center
@@ -689,21 +914,20 @@ fun CleanActiveSessionCard(
                         imageVector = Icons.Default.Timer,
                         contentDescription = null,
                         tint = AccentGreen,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
 
                 Column {
                     Text(
-                        text = "ACTIVE SESSION",
-                        fontSize = 10.sp,
+                        text = "ВРЕМЯ УБОРКИ",
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.6f),
-                        letterSpacing = 0.5.sp
+                        color = Color.White.copy(alpha = 0.6f)
                     )
                     Text(
                         text = if (isTracking) formattedTime else "00:00:00",
-                        fontSize = 17.sp,
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         color = Color.White,
                         fontFamily = FontFamily.Monospace
@@ -711,17 +935,31 @@ fun CleanActiveSessionCard(
                 }
             }
 
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = "ПЛОЩАДЬ ПОКРЫТИЯ",
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White.copy(alpha = 0.6f)
+                )
+                Text(
+                    text = "%.1f м²".format(coveredAreaM2),
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF38BDF8)
+                )
+            }
+
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = "PACKETS SENT",
-                    fontSize = 10.sp,
+                    text = "ПАКЕТОВ WSS",
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White.copy(alpha = 0.6f),
-                    letterSpacing = 0.5.sp
+                    color = Color.White.copy(alpha = 0.6f)
                 )
                 Text(
                     text = "$packetsCount",
-                    fontSize = 17.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     color = Color.White,
                     fontFamily = FontFamily.Monospace
@@ -732,13 +970,15 @@ fun CleanActiveSessionCard(
 }
 
 /**
- * Нижняя строка действий: Кнопка Старт/Стоп и навигационные элементы.
+ * Нижняя панель действий: Кнопка Старт/Стоп и навигация.
  */
 @Composable
 fun CleanBottomControlSection(
     isTracking: Boolean,
     isSimulating: Boolean,
+    isPerimeterMapping: Boolean,
     onToggleCleaning: () -> Unit,
+    onOpenZonesSheet: () -> Unit,
     onToggleSimulation: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit
@@ -751,28 +991,28 @@ fun CleanBottomControlSection(
 
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         // Главная кнопка действия
         Button(
             onClick = onToggleCleaning,
             colors = ButtonDefaults.buttonColors(containerColor = buttonColor),
-            shape = RoundedCornerShape(18.dp),
+            shape = RoundedCornerShape(16.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(48.dp)
                 .testTag("toggle_cleaning_button")
         ) {
             Icon(
                 imageVector = if (isTracking) Icons.Default.Stop else Icons.Default.PlayArrow,
                 contentDescription = null,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(20.dp),
                 tint = Color.White
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = if (isTracking) "Завершить уборку" else "Начать уборку",
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White
             )
@@ -786,35 +1026,38 @@ fun CleanBottomControlSection(
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. Вкладка Главная
+            // 1. Объекты / Периметр
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.padding(2.dp)
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onOpenZonesSheet() }
+                    .padding(2.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(width = 44.dp, height = 28.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(PrimaryContainer),
+                        .size(width = 40.dp, height = 26.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isPerimeterMapping) Color(0xFFFEE2E2) else PrimaryContainer),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Home,
-                        contentDescription = "Главная",
-                        tint = OnPrimaryContainer,
-                        modifier = Modifier.size(18.dp)
+                        imageVector = Icons.Default.Polyline,
+                        contentDescription = "Объекты",
+                        tint = if (isPerimeterMapping) AccentRed else OnPrimaryContainer,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "Главная",
+                    text = "Объекты",
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
                     color = TextPrimary
                 )
             }
 
-            // 2. Кнопка Симуляция движения для теста сайта
+            // 2. Симуляция шагов
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -825,16 +1068,16 @@ fun CleanBottomControlSection(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(width = 44.dp, height = 28.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .size(width = 40.dp, height = 26.dp)
+                        .clip(RoundedCornerShape(12.dp))
                         .background(if (isSimulating) PrimaryContainer else Color.Transparent),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (isSimulating) Icons.Default.PauseCircle else Icons.Default.DirectionsWalk,
-                        contentDescription = "Симуляция шагов",
+                        contentDescription = "Симуляция",
                         tint = if (isSimulating) PrimaryBlue else TextSecondary,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
@@ -846,7 +1089,7 @@ fun CleanBottomControlSection(
                 )
             }
 
-            // 3. Кнопка Логи WSS
+            // 3. Логи WSS
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -856,15 +1099,15 @@ fun CleanBottomControlSection(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(width = 44.dp, height = 28.dp)
-                        .clip(RoundedCornerShape(14.dp)),
+                        .size(width = 40.dp, height = 26.dp)
+                        .clip(RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Description,
                         contentDescription = "Логи WSS",
                         tint = TextSecondary,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
@@ -876,7 +1119,7 @@ fun CleanBottomControlSection(
                 )
             }
 
-            // 4. Кнопка Настройки
+            // 4. Настройки
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -887,15 +1130,15 @@ fun CleanBottomControlSection(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(width = 44.dp, height = 28.dp)
-                        .clip(RoundedCornerShape(14.dp)),
+                        .size(width = 40.dp, height = 26.dp)
+                        .clip(RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Tune,
                         contentDescription = "Настройки",
                         tint = TextSecondary,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 Spacer(modifier = Modifier.height(2.dp))
@@ -905,6 +1148,246 @@ fun CleanBottomControlSection(
                     fontWeight = FontWeight.Medium,
                     color = TextSecondary
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Шторка управления объектами уборки (Подъезды, Дворы) и разметки контуров (Perimeter SLAM).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ZonesAndPerimeterBottomSheet(
+    savedZones: List<FacilityZone>,
+    currentZone: FacilityZone?,
+    isPerimeterMapping: Boolean,
+    onDismiss: () -> Unit,
+    onSelectZone: (FacilityZone) -> Unit,
+    onStartNewPerimeter: (String, ObjectCategory, Int) -> Unit,
+    onDeleteZone: (String) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var isCreatingNew by remember { mutableStateOf(false) }
+    var newZoneName by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf(ObjectCategory.ENTRANCE_BUILDING) }
+    var selectedFloor by remember { mutableStateOf(1) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = CleanSurface
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 8.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            item {
+                Text(
+                    text = "Объекты уборки (Подъезды и Дворы)",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = "Выберите объект для отслеживания покрытия уборки или разметьте новый контур обходом периметра.",
+                    fontSize = 12.sp,
+                    color = TextMuted
+                )
+            }
+
+            if (!isCreatingNew) {
+                // Кнопка начать разметку нового объекта
+                item {
+                    Button(
+                        onClick = { isCreatingNew = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Разметить новый объект (Обход периметра)")
+                    }
+                }
+
+                // Список сохраненных зон
+                items(savedZones) { zone ->
+                    val isSelected = currentZone?.id == zone.id
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected) PrimaryContainer.copy(alpha = 0.5f) else CleanChipBg
+                        ),
+                        border = BorderStroke(1.dp, if (isSelected) PrimaryBlue else CleanBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelectZone(zone) }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = zone.category.emoji,
+                                    fontSize = 22.sp
+                                )
+                                Column {
+                                    Text(
+                                        text = zone.name,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "${zone.category.title} • эт. ${zone.floor} • S ≈ %.0f м²".format(zone.areaSquareMeters),
+                                        fontSize = 11.sp,
+                                        color = TextMuted
+                                    )
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Выбран",
+                                        tint = PrimaryBlue,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                } else {
+                                    IconButton(
+                                        onClick = { onDeleteZone(zone.id) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Удалить",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Форма создания нового объекта для разметки периметра
+                item {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = CleanChipBg),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Параметры нового объекта",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+
+                            // Категория: Подъезд или Двор
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ObjectCategory.values().forEach { cat ->
+                                    val isCatSelected = selectedCategory == cat
+                                    FilledTonalButton(
+                                        onClick = { selectedCategory = cat },
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            containerColor = if (isCatSelected) PrimaryBlue else Color.White,
+                                            contentColor = if (isCatSelected) Color.White else TextPrimary
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("${cat.emoji} ${cat.title}", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+
+                            // Название объекта
+                            OutlinedTextField(
+                                value = newZoneName,
+                                onValueChange = { newZoneName = it },
+                                label = { Text("Название (например: Подъезд 1 • Этаж 3)") },
+                                placeholder = { Text("Введите название...") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+
+                            // Выбор этажа
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Этаж здания:", fontSize = 13.sp, color = TextPrimary)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    IconButton(
+                                        onClick = { if (selectedFloor > -1) selectedFloor-- },
+                                        modifier = Modifier.size(30.dp)
+                                    ) {
+                                        Icon(Icons.Default.Remove, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    }
+                                    Text("эт. $selectedFloor", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    IconButton(
+                                        onClick = { selectedFloor++ },
+                                        modifier = Modifier.size(30.dp)
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            }
+
+                            // Кнопки Начать обход / Отмена
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { isCreatingNew = false },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Назад")
+                                }
+
+                                Button(
+                                    onClick = {
+                                        val finalName = newZoneName.ifEmpty {
+                                            if (selectedCategory == ObjectCategory.ENTRANCE_BUILDING) "Подъезд • Этаж $selectedFloor" else "Дворовая территория"
+                                        }
+                                        onStartNewPerimeter(finalName, selectedCategory, selectedFloor)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                    modifier = Modifier.weight(1.5f)
+                                ) {
+                                    Text("Начать обход")
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1190,4 +1673,3 @@ fun LogsBottomSheet(
         }
     }
 }
-
