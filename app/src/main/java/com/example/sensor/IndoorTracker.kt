@@ -276,7 +276,15 @@ class IndoorTracker(
      * Старт режима разметки периметра для нового объекта (этаж подъезда, двор и т.д.)
      */
     fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int = currentFloor) {
-        val startPt = Position(currentX, currentY, floor, System.currentTimeMillis())
+        // При старте разметки обнуляем локальные координаты в начальный угол (0, 0)
+        currentX = 0.0
+        currentY = 0.0
+        stepCount = 0
+        totalDistance = 0.0
+        headingRadians = 0.0
+        isTracking = true
+
+        val startPt = Position(0.0, 0.0, floor, System.currentTimeMillis())
         val newState = PerimeterMappingState(
             isMapping = true,
             zoneName = name.ifEmpty { "Объект #${_trackerState.value.savedZones.size + 1}" },
@@ -287,7 +295,16 @@ class IndoorTracker(
             computedPerimeterMeters = 0.0,
             computedAreaMeters = 0.0
         )
-        _trackerState.update { it.copy(perimeterState = newState) }
+        _trackerState.update {
+            it.copy(
+                isTracking = true,
+                currentPosition = startPt,
+                headingDegrees = 0f,
+                trajectory = listOf(startPt),
+                coverageSegments = emptyList(),
+                perimeterState = newState
+            )
+        }
     }
 
     /**
@@ -297,6 +314,7 @@ class IndoorTracker(
         val currentPerimeter = _trackerState.value.perimeterState
         if (!currentPerimeter.isMapping || currentPerimeter.isClosed) return
 
+        // Фиксируем дискретный угол (вершину полигона)
         val newPoints = currentPerimeter.perimeterPoints + position
         val perimeterLen = computePerimeterLength(newPoints)
         val area = computePolygonArea(newPoints)
@@ -333,11 +351,21 @@ class IndoorTracker(
             colorHex = zoneColor
         )
 
+        // По завершении разметки помещаем клинера в центр созданного объекта
+        val avgX = finalPoints.map { it.x }.average()
+        val avgY = finalPoints.map { it.y }.average()
+        currentX = avgX
+        currentY = avgY
+        val centerPos = Position(avgX, avgY, pState.floor, System.currentTimeMillis())
+
         _trackerState.update { state ->
             val updatedZones = state.savedZones + newZone
             state.copy(
                 savedZones = updatedZones,
                 currentZone = newZone,
+                currentPosition = centerPos,
+                trajectory = listOf(centerPos),
+                coverageSegments = emptyList(),
                 perimeterState = pState.copy(isClosed = true, isMapping = false)
             )
         }
@@ -600,18 +628,6 @@ class IndoorTracker(
             val updatedTrajectory = (state.trajectory + newPos).takeLast(500)
             val updatedSegments = (state.coverageSegments + segment).takeLast(500)
 
-            // Если включен режим разметки периметра, также автоматически добавляем точки в периметр
-            val updatedPerimeter = if (state.perimeterState.isMapping && !state.perimeterState.isClosed) {
-                val pPoints = state.perimeterState.perimeterPoints + newPos
-                state.perimeterState.copy(
-                    perimeterPoints = pPoints,
-                    computedPerimeterMeters = computePerimeterLength(pPoints),
-                    computedAreaMeters = computePolygonArea(pPoints)
-                )
-            } else {
-                state.perimeterState
-            }
-
             state.copy(
                 currentPosition = newPos,
                 stepCount = stepCount,
@@ -619,10 +635,58 @@ class IndoorTracker(
                 coveredAreaM2 = coveredAreaM2,
                 headingDegrees = Math.toDegrees(headingRadians).toFloat(),
                 trajectory = updatedTrajectory,
-                coverageSegments = updatedSegments,
-                perimeterState = updatedPerimeter
+                coverageSegments = updatedSegments
             )
         }
+    }
+
+    /**
+     * Ручной шаг вперед (для тестирования или интерактивного режима без физической ходьбы)
+     */
+    fun manualStepForward(stepMeters: Double = 0.6) {
+        val prevPos = Position(currentX, currentY, currentFloor, System.currentTimeMillis())
+        stepCount++
+        totalDistance += stepMeters
+
+        val dx = stepMeters * sin(headingRadians)
+        val dy = stepMeters * cos(headingRadians)
+
+        currentX += dx
+        currentY += dy
+
+        val newPos = Position(currentX, currentY, currentFloor, System.currentTimeMillis())
+        val segment = CoverageSegment(
+            start = prevPos,
+            end = newPos,
+            cleaningWidthMeters = cleaningWidthMeters,
+            mode = currentCleaningMode,
+            timestamp = System.currentTimeMillis()
+        )
+
+        if (currentCleaningMode != CleaningMode.IDLE_TRANSIT) {
+            coveredAreaM2 += stepMeters * cleaningWidthMeters
+        }
+
+        _trackerState.update { state ->
+            state.copy(
+                currentPosition = newPos,
+                stepCount = stepCount,
+                totalDistance = totalDistance,
+                coveredAreaM2 = coveredAreaM2,
+                trajectory = (state.trajectory + newPos).takeLast(500),
+                coverageSegments = (state.coverageSegments + segment).takeLast(500)
+            )
+        }
+    }
+
+    /**
+     * Ручной поворот курса на заданный угол (например, +90° по часовой стрелке)
+     */
+    fun manualTurn(degrees: Float) {
+        headingRadians += Math.toRadians(degrees.toDouble())
+        headingRadians = (headingRadians % (2 * PI) + 2 * PI) % (2 * PI)
+        val headingDeg = Math.toDegrees(headingRadians).toFloat()
+        _trackerState.update { it.copy(headingDegrees = headingDeg) }
     }
 
     /**

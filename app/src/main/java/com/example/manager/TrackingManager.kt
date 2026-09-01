@@ -290,34 +290,90 @@ class TrackingManager private constructor(private val appContext: Context) {
         if (_isSimulating.value) return
         _isSimulating.value = true
         TrackingForegroundService.start(context)
-        addLog("Запущена непрерывная симуляция уборки")
+        
+        val zone = indoorTracker.trackerState.value.currentZone
+        val zoneName = zone?.name ?: "Тестовая комната (6×4 м)"
+        addLog("Запущена уборка внутри объекта: $zoneName")
 
         simulationJob?.cancel()
         simulationJob = managerScope.launch {
-            var angle = 0.0
             var simStep = 0
-            val radiusMeters = 7.0
+            
+            // Определяем границы объекта для уборки строго внутри помещения
+            val zonePoints = zone?.polygonPoints ?: listOf(
+                Position(-3.0, -2.0, indoorTracker.trackerState.value.currentPosition.floor),
+                Position(3.0, -2.0, indoorTracker.trackerState.value.currentPosition.floor),
+                Position(3.0, 2.0, indoorTracker.trackerState.value.currentPosition.floor),
+                Position(-3.0, 2.0, indoorTracker.trackerState.value.currentPosition.floor)
+            )
+
+            val minX = zonePoints.minOf { it.x } + 0.3
+            val maxX = zonePoints.maxOf { it.x } - 0.3
+            val minY = zonePoints.minOf { it.y } + 0.3
+            val maxY = zonePoints.maxOf { it.y } - 0.3
+
+            var currentSimX = minX
+            var currentSimY = minY
+            var movingRight = true
+            val widthStep = indoorTracker.trackerState.value.cleaningWidthMeters.coerceIn(0.35, 0.8)
+            val stepDist = 0.35 // 35 см за 1 тик
 
             while (isActive && _isSimulating.value) {
-                angle += 0.12
                 simStep++
-                val pdrX = radiusMeters * cos(angle)
-                val pdrY = (radiusMeters * 0.6) * sin(angle * 1.5)
-                val headingDeg = ((Math.toDegrees(angle) + 90) % 360).toFloat()
 
+                // Траектория "змейка" (boustrophedon) строго внутри стен помещения
+                if (movingRight) {
+                    currentSimX += stepDist
+                    if (currentSimX >= maxX) {
+                        currentSimX = maxX
+                        currentSimY += widthStep
+                        movingRight = false
+                    }
+                } else {
+                    currentSimX -= stepDist
+                    if (currentSimX <= minX) {
+                        currentSimX = minX
+                        currentSimY += widthStep
+                        movingRight = true
+                    }
+                }
+
+                // Если достигли верхней стены, разворачиваемся вниз
+                if (currentSimY > maxY) {
+                    currentSimY = minY
+                }
+
+                val headingDeg = if (movingRight) 90f else 270f
                 val newPos = Position(
-                    x = pdrX,
-                    y = pdrY,
+                    x = currentSimX,
+                    y = currentSimY,
                     floor = indoorTracker.trackerState.value.currentPosition.floor,
                     timestamp = System.currentTimeMillis()
                 )
 
                 indoorTracker.simulateStep(newPos, headingDeg, simStep)
-
                 sendCurrentServerPosition()
-                delay(800L) // Шаг каждые 800 мс
+                delay(650L) // Шаг каждые 650 мс
             }
         }
+    }
+
+    /**
+     * Ручной шаг клинера вперед (для интерактивного мастера разметки или тестирования)
+     */
+    fun manualStepForward(meters: Double = 0.6) {
+        indoorTracker.manualStepForward(meters)
+        sendCurrentServerPosition()
+        addLog("Шаг вперед: +%.1f м".format(meters))
+    }
+
+    /**
+     * Ручной поворот клинера на заданный угол (+90° по часовой стрелке)
+     */
+    fun manualTurn(degrees: Float = 90f) {
+        indoorTracker.manualTurn(degrees)
+        sendCurrentServerPosition()
+        addLog("Поворот курса: %+.0f°".format(degrees))
     }
 
     fun stopSimulation() {

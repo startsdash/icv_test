@@ -98,6 +98,14 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         trackingManager.addPerimeterPoint()
     }
 
+    fun manualStepForward(meters: Double = 0.6) {
+        trackingManager.manualStepForward(meters)
+    }
+
+    fun manualTurn(degrees: Float = 90f) {
+        trackingManager.manualTurn(degrees)
+    }
+
     fun closePerimeter() {
         trackingManager.closePerimeter()
     }

@@ -86,11 +86,34 @@ fun IndoorMapCanvas(
     modifier: Modifier = Modifier,
     backgroundColor: Color = MapBackgroundClean
 ) {
-    // Масштаб: сколько пикселей на 1 метр (по умолчанию 38 px = 1 м)
-    var scale by remember { mutableFloatStateOf(38f) }
+    // Масштаб: сколько пикселей на 1 метр (по умолчанию 42 px = 1 м)
+    var scale by remember { mutableFloatStateOf(42f) }
     // Смещение холста (панорамирование)
     var panOffsetX by remember { mutableFloatStateOf(0f) }
     var panOffsetY by remember { mutableFloatStateOf(0f) }
+
+    // Автоматическое центрирование и подбор масштаба под активный объект
+    androidx.compose.runtime.LaunchedEffect(currentZone?.id) {
+        if (currentZone != null && currentZone.polygonPoints.isNotEmpty()) {
+            val pts = currentZone.polygonPoints
+            val minX = pts.minOf { it.x }
+            val maxX = pts.maxOf { it.x }
+            val minY = pts.minOf { it.y }
+            val maxY = pts.maxOf { it.y }
+
+            val widthM = (maxX - minX).coerceAtLeast(3.0)
+            val heightM = (maxY - minY).coerceAtLeast(3.0)
+
+            // Подбираем масштаб так, чтобы комната занимала 70% холста (примерный размер холста 360x360 dp)
+            val idealScale = (300f / maxOf(widthM, heightM).toFloat()).coerceIn(25f, 90f)
+            scale = idealScale
+
+            val midX = (minX + maxX) / 2.0
+            val midY = (minY + maxY) / 2.0
+            panOffsetX = (-midX * idealScale).toFloat()
+            panOffsetY = (midY * idealScale).toFloat()
+        }
+    }
 
     Box(
         modifier = modifier
@@ -194,6 +217,29 @@ fun IndoorMapCanvas(
                         )
                     }
 
+                    // Размеры стен полигона
+                    for (i in zone.polygonPoints.indices) {
+                        val pA = zone.polygonPoints[i]
+                        val pB = zone.polygonPoints[(i + 1) % zone.polygonPoints.size]
+                        val edgeLen = kotlin.math.sqrt((pB.x - pA.x) * (pB.x - pA.x) + (pB.y - pA.y) * (pB.y - pA.y))
+                        if (edgeLen >= 1.0) {
+                            val offA = toCanvasOffset(pA.x, pA.y)
+                            val offB = toCanvasOffset(pB.x, pB.y)
+                            val midEdgeX = (offA.x + offB.x) / 2f
+                            val midEdgeY = (offA.y + offB.y) / 2f
+                            drawContext.canvas.nativeCanvas.apply {
+                                val wallPaint = android.graphics.Paint().apply {
+                                    color = android.graphics.Color.DKGRAY
+                                    textSize = 20f
+                                    textAlign = android.graphics.Paint.Align.CENTER
+                                    isFakeBoldText = true
+                                    isAntiAlias = true
+                                }
+                                drawText("%.1f м".format(edgeLen), midEdgeX, midEdgeY - 4f, wallPaint)
+                            }
+                        }
+                    }
+
                     // Центроид для отрисовки названия и площади объекта
                     val centerX = sumX / zone.polygonPoints.size
                     val centerY = sumY / zone.polygonPoints.size
@@ -252,6 +298,19 @@ fun IndoorMapCanvas(
                     strokeWidth = 2.2.dp.toPx(),
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
                 )
+
+                // Пунктирная линия возврата к стартовой точке (Угол 1) для замыкания
+                if (points.size >= 3) {
+                    val firstPt = points.first()
+                    val firstOffset = toCanvasOffset(firstPt.x, firstPt.y)
+                    drawLine(
+                        color = Color(0xFF10B981).copy(alpha = 0.7f),
+                        start = curOffset,
+                        end = firstOffset,
+                        strokeWidth = 2.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+                    )
+                }
 
                 // Расстояние в метрах между последним углом и текущим положением
                 val dx = currentPosition.x - lastRecorded.x

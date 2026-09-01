@@ -231,62 +231,154 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
                 onOpenSettings = { showSettingsSheet = true }
             )
 
-            // Активный баннер разметки периметра (если активна)
+            // Активный интерактивный мастер разметки периметра (Interactive Walk HUD)
             if (uiState.trackerState.perimeterState.isMapping) {
                 val pState = uiState.trackerState.perimeterState
+                val lastPt = pState.perimeterPoints.lastOrNull() ?: uiState.trackerState.currentPosition
+                val curPos = uiState.trackerState.currentPosition
+                val currentWallDist = kotlin.math.sqrt(
+                    (curPos.x - lastPt.x) * (curPos.x - lastPt.x) + (curPos.y - lastPt.y) * (curPos.y - lastPt.y)
+                )
+
+                val stepInstruction = when (pState.perimeterPoints.size) {
+                    0 -> "Старт: Встаньте в 1-й угол комнаты и нажмите «+ Угол 1»"
+                    1 -> "Стена 1: Идите вдоль стены до угла 2. Нажмите «+ Угол 2»"
+                    2 -> "Стена 2: Поверните и идите вдоль стены до угла 3. Нажмите «+ Угол 3»"
+                    3 -> "Стена 3: Идите вдоль стены до угла 4. Нажмите «+ Угол 4» или «Замкнуть»"
+                    else -> "Финал: Вернитесь в точку старта (Угол 1) и нажмите «✓ Замкнуть контур»"
+                }
+
                 Surface(
-                    color = Color(0xFF1E293B),
-                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF0F172A),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.5.dp, PrimaryBlue),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(26.dp)
-                                    .clip(CircleShape)
-                                    .background(AccentGreen.copy(alpha = 0.2f)),
-                                contentAlignment = Alignment.Center
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Polyline,
-                                    contentDescription = null,
-                                    tint = AccentGreen,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            }
-                            Column {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(PrimaryBlue),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DirectionsWalk,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
                                 Text(
-                                    text = "РАЗМЕТКА: ${pState.zoneName}",
-                                    fontSize = 11.sp,
+                                    text = "МАСТЕР ОБХОДА: ${pState.zoneName}",
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White,
                                     maxLines = 1
                                 )
-                                Text(
-                                    text = "Точек: ${pState.perimeterPoints.size} • Площадь: %.1f м²".format(pState.computedAreaMeters),
-                                    fontSize = 10.sp,
-                                    color = Color(0xFF94A3B8),
-                                    maxLines = 1
-                                )
+                            }
+
+                            TextButton(
+                                onClick = { viewModel.cancelPerimeterMapping() },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text("Отмена", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
                             }
                         }
 
-                        TextButton(
-                            onClick = { viewModel.cancelPerimeterMapping() },
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        // Текст подсказки текущего шага
+                        Surface(
+                            color = Color(0xFF1E293B),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Отмена", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF87171))
+                            Text(
+                                text = "💡 $stepInstruction",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFF38BDF8),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+
+                        // Метрики разметки: длина текущей стены, точек зафиксировано, площадь
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Текущая стена: %.1f м".format(currentWallDist),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFACC15)
+                            )
+                            Text(
+                                text = "Углов: ${pState.perimeterPoints.size} • S ≈ %.1f м²".format(pState.computedAreaMeters),
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+
+                        // Кнопки действий прямо в мастере: Шаг +0.6м, Поворот 90°, + Угол, Замкнуть
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.addPerimeterPoint() },
+                                colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1.2f).height(38.dp)
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("+ Угол (${pState.perimeterPoints.size + 1})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = { viewModel.closePerimeter() },
+                                enabled = pState.perimeterPoints.size >= 3,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AccentGreen,
+                                    disabledContainerColor = Color(0xFF334155)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1.1f).height(38.dp)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("Замкнуть", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            FilledTonalButton(
+                                onClick = { viewModel.manualStepForward(0.6) },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(0.9f).height(38.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp)
+                            ) {
+                                Text("🚶 +0.6м", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
+
+                            FilledTonalButton(
+                                onClick = { viewModel.manualTurn(90f) },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(0.7f).height(38.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp)
+                            ) {
+                                Text("↪ 90°", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                     }
                 }
