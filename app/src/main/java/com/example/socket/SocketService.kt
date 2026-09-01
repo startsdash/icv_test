@@ -5,53 +5,49 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.example.model.ConnectionState
 import com.example.model.UserPosition
-import io.socket.client.IO
-import io.socket.client.Socket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URI
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 /**
- * Сервис управления сетевым соединением через Socket.io клиент.
- * Подключается к backend-серверу на wss://icv.dotozen.ru.
+ * Сетевой сервис обмена данными по протоколу raw WebSocket (v2.0).
+ * Соответствует технической спецификации сервера https://icv.dotozen.ru.
  *
- * Функциональность:
- * - Подключение/отключение по WebSocket протоколу Socket.io
- * - Автопереподключение при обрыве сети
- * - Отправка события "position_update"
- * - Приём события "map_update" для отладки и отображения других пользователей
- * - Генерация и сохранение постоянного UUID пользователя в SharedPreferences
+ * Адрес: wss://icv.dotozen.ru/
+ * Формат сообщений: JSON c полем "type"
  */
 class SocketService(private val context: Context) {
 
     companion object {
         private const val TAG = "SocketService"
-        // Константа URL Socket.io сервера (WSS с валидным TLS-сертификатом)
-        const val SERVER_URL = "https://icv.dotozen.ru"
+        // WSS URL (сервер Node.js с Nginx reverse proxy и TLS Let's Encrypt)
+        const val SERVER_WSS_URL = "wss://icv.dotozen.ru/"
         private const val PREFS_NAME = "cleaner_tracker_prefs"
         private const val KEY_USER_ID = "unique_user_id"
         private const val KEY_CLEANER_NAME = "cleaner_custom_name"
-
-        // Имена событий протокола Socket.io
-        const val EVENT_POSITION_UPDATE = "position_update"
-        const val EVENT_MAP_UPDATE = "map_update"
-        const val EVENT_PERIMETER_UPDATE = "perimeter_update"
-        const val EVENT_ZONE_UPDATE = "zone_update"
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
-     * Постоянный уникальный идентификатор клинера (UUID), генерируется при первом запуске.
+     * Постоянный уникальный идентификатор клинера (UUID), генерируется один раз и сохраняется на устройстве.
      */
     val userId: String = getOrCreateUserId()
 
@@ -62,13 +58,23 @@ class SocketService(private val context: Context) {
         val trimmed = name.trim()
         _cleanerName.value = trimmed
         prefs.edit().putString(KEY_CLEANER_NAME, trimmed).apply()
+        // Если уже подключены, отправляем повторную регистрацию с новым именем
+        sendRegister()
     }
 
     private fun getSavedCleanerName(): String {
         return prefs.getString(KEY_CLEANER_NAME, "") ?: ""
     }
 
-    private var socket: Socket? = null
+    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .pingInterval(25, TimeUnit.SECONDS) // WS keep-alive пинги
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS) // Бессрочный таймаут для WS потока
+        .build()
+
+    private var webSocket: WebSocket? = null
+    private var reconnectJob: Job? = null
+    private var isIntentionallyClosed = false
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -83,74 +89,80 @@ class SocketService(private val context: Context) {
     val packetsSentCount: StateFlow<Long> = _packetsSentCount.asStateFlow()
 
     /**
-     * Инициализация и подключение к Socket.io серверу.
+     * Инициализация и подключение к WSS серверу (Raw WebSocket).
      */
     fun connect() {
-        if (socket != null && socket?.connected() == true) {
-            Log.d(TAG, "Socket already connected")
+        if (_connectionState.value == ConnectionState.Connected || _connectionState.value == ConnectionState.Connecting) {
+            Log.d(TAG, "WebSocket already connected or connecting")
             return
         }
 
+        isIntentionallyClosed = false
+        reconnectJob?.cancel()
+        _connectionState.value = ConnectionState.Connecting
+
         try {
-            _connectionState.value = ConnectionState.Connecting
+            val request = Request.Builder()
+                .url(SERVER_WSS_URL)
+                .build()
 
-            val options = IO.Options().apply {
-                reconnection = true
-                reconnectionAttempts = Int.MAX_VALUE
-                reconnectionDelay = 1000L
-                reconnectionDelayMax = 5000L
-                timeout = 10000L
-                // Использование надежных транспортов websocket с фоллбеком на polling
-                transports = arrayOf("websocket", "polling")
-            }
-
-            val uri = URI.create(SERVER_URL)
-            val s = IO.socket(uri, options)
-
-            s.on(Socket.EVENT_CONNECT) {
-                Log.i(TAG, "Socket connected successfully: ID = ${s.id()}")
-                _connectionState.value = ConnectionState.Connected
-            }
-
-            s.on(Socket.EVENT_DISCONNECT) { args ->
-                val reason = args.firstOrNull()?.toString() ?: "Unknown reason"
-                Log.w(TAG, "Socket disconnected: $reason")
-                _connectionState.value = ConnectionState.Disconnected
-            }
-
-            s.on(Socket.EVENT_CONNECT_ERROR) { args ->
-                val errorMsg = args.firstOrNull()?.toString() ?: "Connection error"
-                Log.e(TAG, "Socket connect error: $errorMsg")
-                _connectionState.value = ConnectionState.Error(errorMsg)
-            }
-
-            // Слушаем событие "map_update" от сервера (снапшот всех пользователей)
-            s.on(EVENT_MAP_UPDATE) { args ->
-                try {
-                    val rawData = args.firstOrNull()
-                    val parsedUsers = parseMapUpdate(rawData)
-                    _mapUpdateSnapshot.value = parsedUsers
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error parsing map_update payload: ${e.message}", e)
-                }
-            }
-
-            socket = s
-            s.connect()
+            webSocket = okHttpClient.newWebSocket(request, createWebSocketListener())
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize socket: ${e.message}", e)
+            Log.e(TAG, "Failed to start WebSocket: ${e.message}", e)
             _connectionState.value = ConnectionState.Error(e.localizedMessage ?: "Init error")
+            scheduleReconnect()
         }
     }
 
     /**
-     * Отключение от Socket.io сервера.
+     * Создание слушателя событий OkHttp WebSocket.
+     */
+    private fun createWebSocketListener(): WebSocketListener {
+        return object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                Log.i(TAG, "WebSocket connected successfully: $SERVER_WSS_URL")
+                _connectionState.value = ConnectionState.Connected
+                // Согласно п. 4.1 спецификации v2.0: сразу отправляем регистрацию клинера
+                sendRegister()
+            }
+
+            override fun onMessage(ws: WebSocket, text: String) {
+                handleIncomingMessage(text)
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                Log.w(TAG, "WebSocket closing: code=$code, reason=$reason")
+                ws.close(1000, null)
+                _connectionState.value = ConnectionState.Disconnected
+            }
+
+            override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                Log.i(TAG, "WebSocket closed: code=$code, reason=$reason")
+                _connectionState.value = ConnectionState.Disconnected
+                if (!isIntentionallyClosed) {
+                    scheduleReconnect()
+                }
+            }
+
+            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "WebSocket failure: ${t.message}", t)
+                _connectionState.value = ConnectionState.Error(t.localizedMessage ?: "Network error")
+                if (!isIntentionallyClosed) {
+                    scheduleReconnect()
+                }
+            }
+        }
+    }
+
+    /**
+     * Отключение от сервера.
      */
     fun disconnect() {
+        isIntentionallyClosed = true
+        reconnectJob?.cancel()
         try {
-            socket?.disconnect()
-            socket?.off()
-            socket = null
+            webSocket?.close(1000, "Client disconnect")
+            webSocket = null
             _connectionState.value = ConnectionState.Disconnected
         } catch (e: Exception) {
             Log.e(TAG, "Error during disconnect: ${e.message}", e)
@@ -158,18 +170,44 @@ class SocketService(private val context: Context) {
     }
 
     /**
-     * Отправка текущей позиции клинера и параметров покрытия на backend:
-     * Событие: "position_update"
-     * Payload: { 
-     *   "userId": "string", "id": "string", "name": "string",
-     *   "x": number, "y": number, "floor": number, "timestamp": long,
-     *   "cleaningWidth": number, "brushRadius": number, "mode": string, "modeName": string,
-     *   "coveredAreaM2": number, "heading": number, "zoneName": string
-     * }
+     * Автоматическое переподключение с экспоненциальной задержкой при обрыве сети (п. 8.5 спецификации).
+     */
+    private fun scheduleReconnect() {
+        if (isIntentionallyClosed) return
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(2000L)
+            if (isActive && !isIntentionallyClosed && _connectionState.value != ConnectionState.Connected) {
+                Log.d(TAG, "Attempting reconnect to WebSocket...")
+                connect()
+            }
+        }
+    }
+
+    /**
+     * 4.1 Регистрация клинера (при старте смены / первом подключении)
+     */
+    fun sendRegister() {
+        val ws = webSocket ?: return
+        val displayName = _cleanerName.value.ifEmpty { "Клинер ${userId.takeLast(6)}" }
+        val payload = JSONObject().apply {
+            put("type", "register")
+            put("userId", userId)
+            put("role", "cleaner")
+            put("name", displayName)
+        }
+        sendJson(payload)
+        Log.i(TAG, "Sent register: userId=$userId, name=$displayName")
+    }
+
+    /**
+     * 4.2 Обновление позиции и покрытия (каждый шаг или раз в 1-2 сек)
      */
     fun sendPosition(
-        x: Double,
-        y: Double,
+        xMeters: Double,
+        yMeters: Double,
+        xPx: Double,
+        yPx: Double,
         floor: Int,
         customName: String? = null,
         cleaningWidthMeters: Double = 0.5,
@@ -177,146 +215,187 @@ class SocketService(private val context: Context) {
         cleaningModeTitle: String = "Влажная уборка",
         coveredAreaM2: Double = 0.0,
         headingDegrees: Float = 0f,
+        stepCount: Int = 0,
+        totalDistanceMeters: Double = 0.0,
         zoneName: String = ""
     ) {
-        val s = socket
-        if (s == null || !s.connected()) {
-            Log.w(TAG, "Cannot send position: Socket is not connected (state=${_connectionState.value})")
-            return
+        val now = System.currentTimeMillis()
+        val displayName = customName?.ifEmpty { null } ?: _cleanerName.value.ifEmpty { userId }
+        val brushRadiusPx = (cleaningWidthMeters * 10.0) / 2.0 // scale = 10 px/м
+
+        val payload = JSONObject().apply {
+            put("type", "position_update")
+            put("userId", userId)
+            put("xMeters", xMeters)
+            put("yMeters", yMeters)
+            put("x", xPx)
+            put("y", yPx)
+            put("floor", floor)
+            put("heading", headingDegrees.toDouble())
+            put("stepCount", stepCount)
+            put("totalDistance", totalDistanceMeters)
+            put("timestamp", now)
+            put("cleaningWidth", cleaningWidthMeters)
+            put("brushRadius", brushRadiusPx)
+            put("mode", cleaningModeName)
+            put("modeName", cleaningModeTitle)
+            put("coveredAreaM2", coveredAreaM2)
+            if (zoneName.isNotEmpty()) {
+                put("zoneName", zoneName)
+            }
         }
 
-        scope.launch {
-            try {
-                val now = System.currentTimeMillis()
-                val displayName = customName?.ifEmpty { null } ?: _cleanerName.value.ifEmpty { userId }
-                val payload = JSONObject().apply {
-                    put("userId", userId)
-                    put("id", userId)
-                    put("name", displayName)
-                    put("x", x)
-                    put("y", y)
-                    put("floor", floor)
-                    put("timestamp", now)
-                    // Расширенные данные покрытия и уборочного инвентаря
-                    put("cleaningWidth", cleaningWidthMeters)
-                    put("brushRadius", cleaningWidthMeters / 2.0)
-                    put("mode", cleaningModeName)
-                    put("modeName", cleaningModeTitle)
-                    put("coveredAreaM2", coveredAreaM2)
-                    put("heading", headingDegrees)
-                    if (zoneName.isNotEmpty()) {
-                        put("zoneName", zoneName)
-                    }
-                }
-
-                s.emit(EVENT_POSITION_UPDATE, payload)
-                _lastSentTimestamp.value = now
-                _packetsSentCount.value += 1
-                Log.d(TAG, "Sent position: name=$displayName (x=%.2f, y=%.2f, mode=$cleaningModeName, width=%.2fm)".format(x, y))
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to emit position_update: ${e.message}", e)
-            }
+        if (sendJson(payload)) {
+            _lastSentTimestamp.value = now
+            _packetsSentCount.value += 1
+            Log.d(TAG, "Sent position_update: xM=%.2f, yM=%.2f, mode=$cleaningModeName".format(xMeters, yMeters))
         }
     }
 
     /**
-     * Отправка размеченного периметра объекта (этаж подъезда, двор, площадка) на сервер:
-     * Событие: "perimeter_update"
+     * 4.4 Разметка зоны / периметра (Perimeter SLAM)
      */
     fun sendZonePerimeter(
         zoneId: String,
         zoneName: String,
         category: String,
         floor: Int,
-        points: List<Pair<Double, Double>>,
+        points: List<Triple<Double, Double, Pair<Double, Double>>>, // (xPx, yPx, (xMeters, yMeters))
         areaM2: Double
     ) {
-        val s = socket
-        if (s == null || !s.connected()) return
+        val pointsArray = JSONArray()
+        points.forEach { (xPx, yPx, meters) ->
+            pointsArray.put(JSONObject().apply {
+                put("x", xPx)
+                put("y", yPx)
+                put("xMeters", meters.first)
+                put("yMeters", meters.second)
+            })
+        }
 
-        scope.launch {
-            try {
-                val pointsArray = JSONArray()
-                points.forEach { (px, py) ->
-                    pointsArray.put(JSONObject().apply {
-                        put("x", px)
-                        put("y", py)
-                    })
-                }
+        val payload = JSONObject().apply {
+            put("type", "perimeter_update")
+            put("zoneId", zoneId)
+            put("zoneName", zoneName)
+            put("category", category)
+            put("floor", floor)
+            put("points", pointsArray)
+            put("areaM2", areaM2)
+            put("timestamp", System.currentTimeMillis())
+        }
 
-                val payload = JSONObject().apply {
-                    put("userId", userId)
-                    put("zoneId", zoneId)
-                    put("zoneName", zoneName)
-                    put("category", category)
-                    put("floor", floor)
-                    put("points", pointsArray)
-                    put("areaM2", areaM2)
-                    put("timestamp", System.currentTimeMillis())
-                }
+        sendJson(payload)
+        Log.i(TAG, "Sent perimeter_update: $zoneName with ${points.size} points, area=%.2f m²".format(areaM2))
+    }
 
-                s.emit(EVENT_PERIMETER_UPDATE, payload)
-                s.emit(EVENT_ZONE_UPDATE, payload)
-                Log.i(TAG, "Sent zone perimeter: $zoneName with ${points.size} points, area=%.2f m²".format(areaM2))
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send perimeter update: ${e.message}", e)
-            }
+    /**
+     * 4.5 Завершение смены (Stop tracking)
+     */
+    fun sendStopTracking() {
+        val payload = JSONObject().apply {
+            put("type", "stop_tracking")
+            put("userId", userId)
+        }
+        sendJson(payload)
+        Log.i(TAG, "Sent stop_tracking for userId=$userId")
+    }
+
+    /**
+     * Отправка JSON-сообщения по WebSocket.
+     */
+    private fun sendJson(json: JSONObject): Boolean {
+        val ws = webSocket
+        if (ws == null || _connectionState.value != ConnectionState.Connected) {
+            return false
+        }
+        return try {
+            ws.send(json.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending WS message: ${e.message}", e)
+            false
         }
     }
 
     /**
-     * Парсинг снапшота "map_update" от сервера.
-     * Сервер может слать JSON-массив объектов или объект с полем "users".
+     * Обработка входящих сообщений от сервера (п. 5 спецификации).
      */
-    private fun parseMapUpdate(data: Any?): List<UserPosition> {
-        val result = mutableListOf<UserPosition>()
-        when (data) {
-            is JSONArray -> {
-                for (i in 0 until data.length()) {
-                    val obj = data.optJSONObject(i) ?: continue
-                    parseUserPosition(obj)?.let { result.add(it) }
-                }
-            }
-            is JSONObject -> {
-                val usersArray = data.optJSONArray("users")
-                if (usersArray != null) {
-                    for (i in 0 until usersArray.length()) {
-                        val obj = usersArray.optJSONObject(i) ?: continue
-                        parseUserPosition(obj)?.let { result.add(it) }
+    private fun handleIncomingMessage(text: String) {
+        try {
+            val json = JSONObject(text)
+            val type = json.optString("type", "")
+
+            when (type) {
+                "snapshot" -> {
+                    // 5.1 Snapshot состояния
+                    val cleaners = json.optJSONArray("cleaners")
+                    if (cleaners != null) {
+                        parseCleanersArray(cleaners)
                     }
-                } else {
-                    // Возможно передан один объект
-                    parseUserPosition(data)?.let { result.add(it) }
                 }
-            }
-            is String -> {
-                // Если данные пришли в виде сырой строки JSON
-                val jsonTrim = data.trim()
-                if (jsonTrim.startsWith("[")) {
-                    val jsonArray = JSONArray(jsonTrim)
-                    for (i in 0 until jsonArray.length()) {
-                        val obj = jsonArray.optJSONObject(i) ?: continue
-                        parseUserPosition(obj)?.let { result.add(it) }
+                "cleaners" -> {
+                    // 5.4 Периодическая сводка клинеров
+                    val list = json.optJSONArray("list")
+                    if (list != null) {
+                        parseCleanersArray(list)
                     }
-                } else if (jsonTrim.startsWith("{")) {
-                    val jsonObj = JSONObject(jsonTrim)
-                    parseMapUpdate(jsonObj)
+                }
+                "position_update" -> {
+                    // 5.2 Релей позиции
+                    val uid = json.optString("userId", "")
+                    if (uid.isNotEmpty() && uid != userId) {
+                        val otherPos = UserPosition(
+                            userId = uid,
+                            x = json.optDouble("x", 400.0),
+                            y = json.optDouble("y", 300.0),
+                            floor = json.optInt("floor", 1),
+                            timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        )
+                        updateSingleCleanerPosition(otherPos)
+                    }
+                }
+                "cleaner_status" -> {
+                    val uid = json.optString("userId", "")
+                    val online = json.optBoolean("online", false)
+                    Log.d(TAG, "Cleaner status: uid=$uid, online=$online")
+                }
+                "pong" -> {
+                    Log.d(TAG, "Received pong from server")
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing incoming WS message: ${e.message}", e)
         }
-        return result
     }
 
-    private fun parseUserPosition(obj: JSONObject): UserPosition? {
-        val uid = obj.optString("userId", obj.optString("id", ""))
-        if (uid.isEmpty()) return null
+    private fun parseCleanersArray(array: JSONArray) {
+        val result = mutableListOf<UserPosition>()
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            val uid = obj.optString("userId", "")
+            if (uid.isNotEmpty() && uid != userId && obj.optBoolean("online", true)) {
+                result.add(
+                    UserPosition(
+                        userId = uid,
+                        x = obj.optDouble("x", 400.0),
+                        y = obj.optDouble("y", 300.0),
+                        floor = obj.optInt("floor", 1),
+                        timestamp = obj.optLong("lastTs", System.currentTimeMillis())
+                    )
+                )
+            }
+        }
+        _mapUpdateSnapshot.value = result
+    }
 
-        val x = obj.optDouble("x", 0.0)
-        val y = obj.optDouble("y", 0.0)
-        val floor = obj.optInt("floor", 1)
-        val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
-
-        return UserPosition(userId = uid, x = x, y = y, floor = floor, timestamp = timestamp)
+    private fun updateSingleCleanerPosition(pos: UserPosition) {
+        val current = _mapUpdateSnapshot.value.toMutableList()
+        val idx = current.indexOfFirst { it.userId == pos.userId }
+        if (idx >= 0) {
+            current[idx] = pos
+        } else {
+            current.add(pos)
+        }
+        _mapUpdateSnapshot.value = current
     }
 
     /**
@@ -325,7 +404,7 @@ class SocketService(private val context: Context) {
     private fun getOrCreateUserId(): String {
         var id = prefs.getString(KEY_USER_ID, null)
         if (id.isNullOrEmpty()) {
-            id = "cleaner-" + UUID.randomUUID().toString().take(8)
+            id = "cleaner_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().take(4)
             prefs.edit().putString(KEY_USER_ID, id).apply()
             Log.i(TAG, "Generated new user ID: $id")
         }

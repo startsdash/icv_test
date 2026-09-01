@@ -144,6 +144,6 @@ data class PdrConfig(
 data class ServerMapConfig(
     val originX: Double = 400.0,
     val originY: Double = 300.0,
-    val pixelsPerMeter: Double = 20.0,
+    val pixelsPerMeter: Double = 10.0,
     val cleanerName: String = ""
 )

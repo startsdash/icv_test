@@ -164,6 +164,7 @@ class TrackingManager private constructor(private val appContext: Context) {
 
     fun stopCleaningSession(context: Context) {
         sendCurrentServerPosition()
+        socketService.sendStopTracking()
         indoorTracker.stopTracking()
         stopPeriodicSending()
         stopDurationTimer()
@@ -212,9 +213,10 @@ class TrackingManager private constructor(private val appContext: Context) {
         val zone = indoorTracker.closePerimeter()
         if (zone != null) {
             addLog("Контур замкнут! Создан объект: ${zone.name} (Площадь: %.1f м²)".format(zone.areaSquareMeters))
-            // Отправляем полигон на сервер через сокет
+            // Отправляем полигон на сервер через сокет с пикселями и метрами
             val serverPoints = zone.polygonPoints.map { pt ->
-                calculateServerCoords(pt.x, pt.y, _serverMapConfig.value)
+                val (px, py) = calculateServerCoords(pt.x, pt.y, _serverMapConfig.value)
+                Triple(px, py, Pair(pt.x, pt.y))
             }
             socketService.sendZonePerimeter(
                 zoneId = zone.id,
@@ -327,8 +329,10 @@ class TrackingManager private constructor(private val appContext: Context) {
         val (sx, sy) = calculateServerCoords(currentPdr.x, currentPdr.y, _serverMapConfig.value)
 
         socketService.sendPosition(
-            x = sx,
-            y = sy,
+            xMeters = currentPdr.x,
+            yMeters = currentPdr.y,
+            xPx = sx,
+            yPx = sy,
             floor = currentPdr.floor,
             customName = _serverMapConfig.value.cleanerName,
             cleaningWidthMeters = tState.cleaningWidthMeters,
@@ -336,6 +340,8 @@ class TrackingManager private constructor(private val appContext: Context) {
             cleaningModeTitle = tState.cleaningMode.title,
             coveredAreaM2 = tState.coveredAreaM2,
             headingDegrees = tState.headingDegrees,
+            stepCount = tState.stepCount,
+            totalDistanceMeters = tState.totalDistance,
             zoneName = tState.currentZone?.name ?: ""
         )
     }
