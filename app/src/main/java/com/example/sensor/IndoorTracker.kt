@@ -408,9 +408,21 @@ class IndoorTracker(
 
         _trackerState.update { state ->
             val updatedZones = state.savedZones + newZone
+            val centerPos = Position(0.0, 0.0, floor, System.currentTimeMillis())
+            currentX = 0.0
+            currentY = 0.0
+            stepCount = 0
+            totalDistance = 0.0
+            coveredAreaM2 = 0.0
             state.copy(
                 savedZones = updatedZones,
-                currentZone = newZone
+                currentZone = newZone,
+                currentPosition = centerPos,
+                stepCount = 0,
+                totalDistance = 0.0,
+                coveredAreaM2 = 0.0,
+                trajectory = listOf(centerPos),
+                coverageSegments = emptyList()
             )
         }
         return newZone
@@ -424,10 +436,32 @@ class IndoorTracker(
     }
 
     /**
-     * Выбор активного объекта/зоны
+     * Выбор активного объекта/зоны и позиционирование в центр объекта
      */
     fun selectActiveZone(zone: FacilityZone?) {
-        _trackerState.update { it.copy(currentZone = zone) }
+        if (zone != null && zone.polygonPoints.isNotEmpty()) {
+            val avgX = zone.polygonPoints.map { it.x }.average()
+            val avgY = zone.polygonPoints.map { it.y }.average()
+            currentX = avgX
+            currentY = avgY
+            stepCount = 0
+            totalDistance = 0.0
+            coveredAreaM2 = 0.0
+            val centerPos = Position(avgX, avgY, zone.floor, System.currentTimeMillis())
+            _trackerState.update {
+                it.copy(
+                    currentZone = zone,
+                    currentPosition = centerPos,
+                    stepCount = 0,
+                    totalDistance = 0.0,
+                    coveredAreaM2 = 0.0,
+                    trajectory = listOf(centerPos),
+                    coverageSegments = emptyList()
+                )
+            }
+        } else {
+            _trackerState.update { it.copy(currentZone = zone) }
+        }
     }
 
     /**
