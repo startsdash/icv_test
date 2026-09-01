@@ -232,6 +232,24 @@ class TrackingManager private constructor(private val appContext: Context) {
         }
     }
 
+    fun createQuickZone(name: String, category: ObjectCategory, floor: Int, widthMeters: Double, heightMeters: Double) {
+        val zone = indoorTracker.createQuickZone(name, category, floor, widthMeters, heightMeters)
+        addLog("Создан объект: ${zone.name} (Площадь: %.1f м²)".format(zone.areaSquareMeters))
+        val serverPoints = zone.polygonPoints.map { pt ->
+            val (px, py) = calculateServerCoords(pt.x, pt.y, _serverMapConfig.value)
+            Triple(px, py, Pair(pt.x, pt.y))
+        }
+        socketService.sendZonePerimeter(
+            zoneId = zone.id,
+            zoneName = zone.name,
+            category = zone.category.name,
+            floor = zone.floor,
+            points = serverPoints,
+            areaM2 = zone.areaSquareMeters
+        )
+        sendCurrentServerPosition()
+    }
+
     fun cancelPerimeterMapping() {
         indoorTracker.cancelPerimeterMapping()
         addLog("Разметка периметра отменена")

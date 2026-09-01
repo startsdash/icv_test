@@ -82,6 +82,7 @@ fun IndoorMapCanvas(
     cleaningWidthMeters: Double = 0.5,
     cleaningMode: CleaningMode = CleaningMode.WET_CLEANING,
     otherUsers: List<UserPosition> = emptyList(),
+    showOnlyActiveZone: Boolean = true,
     modifier: Modifier = Modifier,
     backgroundColor: Color = MapBackgroundClean
 ) {
@@ -130,9 +131,15 @@ fun IndoorMapCanvas(
             }
 
             // =================================================================
-            // 2. Отрисовка сохраненных объектов / полигонов (подъезды, дворы)
+            // 2. Отрисовка размеченных объектов / полигонов (подъезды, дворы)
             // =================================================================
-            savedZones.forEach { zone ->
+            val zonesToDraw = if (showOnlyActiveZone && currentZone != null) {
+                listOf(currentZone)
+            } else {
+                savedZones.filter { it.floor == currentPosition.floor }
+            }
+
+            zonesToDraw.forEach { zone ->
                 if (zone.floor == currentPosition.floor && zone.polygonPoints.size >= 3) {
                     val zonePath = Path()
                     val firstPt = toCanvasOffset(zone.polygonPoints.first().x, zone.polygonPoints.first().y)
@@ -151,8 +158,8 @@ fun IndoorMapCanvas(
 
                     val isCurrent = currentZone?.id == zone.id
                     val baseColor = Color(zone.colorHex)
-                    val fillColor = if (isCurrent) baseColor.copy(alpha = 0.16f) else baseColor.copy(alpha = 0.08f)
-                    val strokeColor = if (isCurrent) baseColor.copy(alpha = 0.85f) else baseColor.copy(alpha = 0.45f)
+                    val fillColor = if (isCurrent) baseColor.copy(alpha = 0.18f) else baseColor.copy(alpha = 0.08f)
+                    val strokeColor = if (isCurrent) baseColor.copy(alpha = 0.95f) else baseColor.copy(alpha = 0.50f)
 
                     // Заливка полигона объекта
                     drawPath(
@@ -161,30 +168,47 @@ fun IndoorMapCanvas(
                         style = Fill
                     )
 
-                    // Контур полигона объекта
+                    // Четкий контур полигона объекта
                     drawPath(
                         path = zonePath,
                         color = strokeColor,
                         style = Stroke(
-                            width = if (isCurrent) 2.2.dp.toPx() else 1.4.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 6f), 0f)
+                            width = if (isCurrent) 3.dp.toPx() else 1.8.dp.toPx(),
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round
                         )
                     )
 
-                    // Центроид для отрисовки названия объекта
+                    // Отрисовка маркеров каждого угла полигона (чтобы углы были четко видны)
+                    zone.polygonPoints.forEach { pt ->
+                        val cornerOffset = toCanvasOffset(pt.x, pt.y)
+                        drawCircle(
+                            color = Color.White,
+                            radius = 4.5.dp.toPx(),
+                            center = cornerOffset
+                        )
+                        drawCircle(
+                            color = strokeColor,
+                            radius = 3.dp.toPx(),
+                            center = cornerOffset
+                        )
+                    }
+
+                    // Центроид для отрисовки названия и площади объекта
                     val centerX = sumX / zone.polygonPoints.size
                     val centerY = sumY / zone.polygonPoints.size
                     val centerOffset = toCanvasOffset(centerX, centerY)
 
                     drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply {
+                        val textPaint = android.graphics.Paint().apply {
                             color = android.graphics.Color.DKGRAY
                             textSize = 28f
                             textAlign = android.graphics.Paint.Align.CENTER
                             isFakeBoldText = true
                             isAntiAlias = true
                         }
-                        drawText("${zone.name} (%.0f м²)".format(zone.areaSquareMeters), centerOffset.x, centerOffset.y, paint)
+                        val title = "${zone.name} (%.1f м²)".format(zone.areaSquareMeters)
+                        drawText(title, centerOffset.x, centerOffset.y, textPaint)
                     }
                 }
             }
@@ -209,7 +233,7 @@ fun IndoorMapCanvas(
                         path = pPath,
                         color = pColor,
                         style = Stroke(
-                            width = 2.5.dp.toPx(),
+                            width = 3.dp.toPx(),
                             cap = StrokeCap.Round,
                             join = StrokeJoin.Round
                         )
@@ -222,30 +246,52 @@ fun IndoorMapCanvas(
                 val curOffset = toCanvasOffset(currentPosition.x, currentPosition.y)
 
                 drawLine(
-                    color = pColor.copy(alpha = 0.7f),
+                    color = pColor.copy(alpha = 0.85f),
                     start = lastOffset,
                     end = curOffset,
-                    strokeWidth = 2.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                    strokeWidth = 2.2.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f), 0f)
                 )
+
+                // Расстояние в метрах между последним углом и текущим положением
+                val dx = currentPosition.x - lastRecorded.x
+                val dy = currentPosition.y - lastRecorded.y
+                val distM = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (distM > 0.3) {
+                    val midX = (lastOffset.x + curOffset.x) / 2f
+                    val midY = (lastOffset.y + curOffset.y) / 2f
+                    drawContext.canvas.nativeCanvas.apply {
+                        val distPaint = android.graphics.Paint().apply {
+                            color = android.graphics.Color.parseColor("#B91C1C")
+                            textSize = 24f
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            isFakeBoldText = true
+                            isAntiAlias = true
+                        }
+                        drawText("%.1f м".format(distM), midX, midY - 10f, distPaint)
+                    }
+                }
 
                 // Нумерованные контрольные точки (углы)
                 points.forEachIndexed { index, pt ->
                     val ptOffset = toCanvasOffset(pt.x, pt.y)
+                    val isFirst = index == 0
+                    val markerColor = if (isFirst) Color(0xFF10B981) else pColor
+
                     drawCircle(
                         color = Color.White,
-                        radius = 8.dp.toPx(),
+                        radius = 9.dp.toPx(),
                         center = ptOffset
                     )
                     drawCircle(
-                        color = pColor,
-                        radius = 6.dp.toPx(),
+                        color = markerColor,
+                        radius = 7.dp.toPx(),
                         center = ptOffset
                     )
                     drawContext.canvas.nativeCanvas.apply {
                         val textPaint = android.graphics.Paint().apply {
                             color = android.graphics.Color.WHITE
-                            textSize = 20f
+                            textSize = 22f
                             textAlign = android.graphics.Paint.Align.CENTER
                             isFakeBoldText = true
                             isAntiAlias = true

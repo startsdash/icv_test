@@ -345,6 +345,50 @@ class IndoorTracker(
     }
 
     /**
+     * Быстрое создание объекта с заданными геометрическими размерами (прямоугольник W x H).
+     */
+    fun createQuickZone(
+        name: String,
+        category: ObjectCategory,
+        floor: Int,
+        widthMeters: Double,
+        heightMeters: Double
+    ): FacilityZone {
+        val halfW = widthMeters / 2.0
+        val halfH = heightMeters / 2.0
+        val points = listOf(
+            Position(-halfW, -halfH, floor),
+            Position(halfW, -halfH, floor),
+            Position(halfW, halfH, floor),
+            Position(-halfW, halfH, floor)
+        )
+        val area = widthMeters * heightMeters
+        val zoneColor = when (category) {
+            ObjectCategory.ENTRANCE_BUILDING -> 0xFF0284C7
+            ObjectCategory.OUTDOOR_YARD -> 0xFF10B981
+        }
+
+        val newZone = FacilityZone(
+            id = "zone_${UUID.randomUUID().toString().take(8)}",
+            name = name.ifEmpty { "${category.title} (${widthMeters.toInt()}×${heightMeters.toInt()} м)" },
+            category = category,
+            floor = floor,
+            polygonPoints = points,
+            areaSquareMeters = area,
+            colorHex = zoneColor
+        )
+
+        _trackerState.update { state ->
+            val updatedZones = state.savedZones + newZone
+            state.copy(
+                savedZones = updatedZones,
+                currentZone = newZone
+            )
+        }
+        return newZone
+    }
+
+    /**
      * Отмена текущей разметки периметра
      */
     fun cancelPerimeterMapping() {

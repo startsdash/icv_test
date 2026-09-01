@@ -163,6 +163,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showLogsDialog by remember { mutableStateOf(false) }
     var showZonesSheet by remember { mutableStateOf(false) }
+    var showOnlyActiveZone by remember { mutableStateOf(true) }
 
     // Перехват системной кнопки "Назад" для безопасного выхода из шторок и разметки
     BackHandler(enabled = showSettingsSheet || showLogsDialog || showZonesSheet || uiState.trackerState.perimeterState.isMapping) {
@@ -312,6 +313,7 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
             CleanDiagnosticsAndMapCard(
                 uiState = uiState,
                 otherUsers = otherUsers,
+                showOnlyActiveZone = showOnlyActiveZone,
                 modifier = Modifier.weight(1f)
             )
 
@@ -347,9 +349,15 @@ fun CleanerTrackerScreen(viewModel: CleanerTrackerViewModel) {
                 savedZones = uiState.trackerState.savedZones,
                 currentZone = uiState.trackerState.currentZone,
                 isPerimeterMapping = uiState.trackerState.perimeterState.isMapping,
+                showOnlyActiveZone = showOnlyActiveZone,
+                onToggleShowOnlyActive = { showOnlyActiveZone = it },
                 onDismiss = { showZonesSheet = false },
                 onSelectZone = {
                     viewModel.selectActiveZone(it)
+                    showZonesSheet = false
+                },
+                onQuickCreateZone = { name, category, floor, width, height ->
+                    viewModel.createQuickZone(name, category, floor, width, height)
                     showZonesSheet = false
                 },
                 onStartNewPerimeter = { name, category, floor ->
@@ -797,6 +805,7 @@ fun CleanMetricBox(
 fun CleanDiagnosticsAndMapCard(
     uiState: TrackerUiState,
     otherUsers: List<com.example.model.UserPosition>,
+    showOnlyActiveZone: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val state = uiState.trackerState
@@ -868,6 +877,7 @@ fun CleanDiagnosticsAndMapCard(
                     cleaningWidthMeters = state.cleaningWidthMeters,
                     cleaningMode = state.cleaningMode,
                     otherUsers = otherUsers,
+                    showOnlyActiveZone = showOnlyActiveZone,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -1211,16 +1221,22 @@ fun ZonesAndPerimeterBottomSheet(
     savedZones: List<FacilityZone>,
     currentZone: FacilityZone?,
     isPerimeterMapping: Boolean,
+    showOnlyActiveZone: Boolean,
+    onToggleShowOnlyActive: (Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSelectZone: (FacilityZone) -> Unit,
+    onQuickCreateZone: (String, ObjectCategory, Int, Double, Double) -> Unit,
     onStartNewPerimeter: (String, ObjectCategory, Int) -> Unit,
     onDeleteZone: (String) -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var isCreatingNew by remember { mutableStateOf(false) }
+    var creationMethod by remember { mutableStateOf(0) } // 0 = Готовый размер (1 клик), 1 = Обход периметра (PDR)
     var newZoneName by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf(ObjectCategory.ENTRANCE_BUILDING) }
     var selectedFloor by remember { mutableStateOf(1) }
+    var customWidthM by remember { mutableStateOf("6.0") }
+    var customHeightM by remember { mutableStateOf("4.0") }
 
     // Intercept back button when in create mode to return to list instead of closing app
     BackHandler(enabled = isCreatingNew) {
@@ -1246,7 +1262,7 @@ fun ZonesAndPerimeterBottomSheet(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (isCreatingNew) "Новый объект (Разметка)" else "Объекты уборки",
+                        text = if (isCreatingNew) "Создание нового объекта" else "Объекты уборки",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
@@ -1256,14 +1272,50 @@ fun ZonesAndPerimeterBottomSheet(
                     }
                 }
                 Text(
-                    text = if (isCreatingNew) "Задайте параметры объекта и нажмите «Начать обход»." else "Выберите объект для отслеживания или разметьте новый обходом периметра.",
+                    text = if (isCreatingNew) "Создайте объект готового размера или пройдите периметр пешком." else "Выберите активный объект для фокусировки карты или создайте новый.",
                     fontSize = 11.sp,
                     color = TextMuted
                 )
             }
 
             if (!isCreatingNew) {
-                // Кнопка начать разметку нового объекта
+                // Тумблер: Показывать только активный объект (устраняет кучу на карте)
+                item {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = CleanChipBg),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Только активный объект на карте",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = if (showOnlyActiveZone) "Скрывает другие объекты, фокус на текущем" else "Отображает все сохраненные объекты разом",
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            }
+                            androidx.compose.material3.Switch(
+                                checked = showOnlyActiveZone,
+                                onCheckedChange = onToggleShowOnlyActive,
+                                modifier = Modifier.size(width = 46.dp, height = 28.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Кнопка создать новый объект
                 item {
                     Button(
                         onClick = { isCreatingNew = true },
@@ -1273,7 +1325,7 @@ fun ZonesAndPerimeterBottomSheet(
                     ) {
                         Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Разметить новый объект (Обход периметра)", fontSize = 12.sp)
+                        Text("Создать / Разметить новый объект", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 
@@ -1313,7 +1365,7 @@ fun ZonesAndPerimeterBottomSheet(
                                         color = TextPrimary
                                     )
                                     Text(
-                                        text = "${zone.category.title} • эт. ${zone.floor} • S ≈ %.0f м²".format(zone.areaSquareMeters),
+                                        text = "${zone.category.title} • эт. ${zone.floor} • S ≈ %.1f м² (${zone.polygonPoints.size} углов)".format(zone.areaSquareMeters),
                                         fontSize = 11.sp,
                                         color = TextMuted
                                     )
@@ -1346,7 +1398,7 @@ fun ZonesAndPerimeterBottomSheet(
                     }
                 }
             } else {
-                // Форма создания нового объекта для разметки периметра
+                // Форма создания нового объекта (с двумя режимами: 1 клик или Обход)
                 item {
                     Card(
                         shape = RoundedCornerShape(14.dp),
@@ -1357,6 +1409,42 @@ fun ZonesAndPerimeterBottomSheet(
                             modifier = Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            // Переключатель метода создания: Шаблон (1 клик) / Обход периметра (PDR)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.White)
+                                    .padding(3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Button(
+                                    onClick = { creationMethod = 0 },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (creationMethod == 0) PrimaryBlue else Color.Transparent,
+                                        contentColor = if (creationMethod == 0) Color.White else TextPrimary
+                                    ),
+                                    elevation = null,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f).height(36.dp)
+                                ) {
+                                    Text("⚡ Готовые размеры (1 клик)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+
+                                Button(
+                                    onClick = { creationMethod = 1 },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (creationMethod == 1) PrimaryBlue else Color.Transparent,
+                                        contentColor = if (creationMethod == 1) Color.White else TextPrimary
+                                    ),
+                                    elevation = null,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f).height(36.dp)
+                                ) {
+                                    Text("🚶 Обход ногами (PDR)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+                            }
+
                             // Категория: Подъезд или Двор
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1382,7 +1470,7 @@ fun ZonesAndPerimeterBottomSheet(
                             OutlinedTextField(
                                 value = newZoneName,
                                 onValueChange = { newZoneName = it },
-                                label = { Text("Название (например: Подъезд 1 • Этаж 3)", fontSize = 11.sp) },
+                                label = { Text("Название (например: Подъезд 1 • Этаж $selectedFloor)", fontSize = 11.sp) },
                                 placeholder = { Text("Введите название...", fontSize = 11.sp) },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -1416,7 +1504,90 @@ fun ZonesAndPerimeterBottomSheet(
                                 }
                             }
 
-                            // Кнопки Начать обход / Отмена
+                            if (creationMethod == 0) {
+                                // ⚡ БЫСТРЫЕ ШАБЛОНЫ РАЗМЕРОВ
+                                Text(
+                                    text = "Быстрые шаблоны с точными углами:",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = TextSecondary
+                                )
+
+                                val presets = listOf(
+                                    Triple("4×3 м", 4.0, 3.0),
+                                    Triple("6×4 м (24 м²)", 6.0, 4.0),
+                                    Triple("10×6 м (60 м²)", 10.0, 6.0),
+                                    Triple("20×10 м (200 м²)", 20.0, 10.0)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    presets.forEach { (title, w, h) ->
+                                        OutlinedButton(
+                                            onClick = {
+                                                customWidthM = w.toString()
+                                                customHeightM = h.toString()
+                                            },
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.weight(1f).height(34.dp),
+                                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp)
+                                        ) {
+                                            Text(title, fontSize = 10.sp, maxLines = 1)
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = customWidthM,
+                                        onValueChange = { customWidthM = it },
+                                        label = { Text("Длина (м)", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    OutlinedTextField(
+                                        value = customHeightM,
+                                        onValueChange = { customHeightM = it },
+                                        label = { Text("Ширина (м)", fontSize = 10.sp) },
+                                        singleLine = true,
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                }
+                            } else {
+                                // 🚶 ИНСТРУКЦИЯ ПО ОБХОДУ ПЕРИМЕТРА
+                                Surface(
+                                    color = PrimaryContainer.copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Как правильно разметить помещение:",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = PrimaryBlue
+                                        )
+                                        Text(
+                                            text = "1. Встаньте в первый угол комнаты и нажмите «Начать обход».\n2. Дойдите вдоль стены до следующего угла и нажмите «+ Угол».\n3. Обойдите все углы помещения и нажмите «Замкнуть».",
+                                            fontSize = 10.sp,
+                                            color = TextPrimary,
+                                            lineHeight = 14.sp
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Кнопки Действия / Отмена
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1429,20 +1600,40 @@ fun ZonesAndPerimeterBottomSheet(
                                     Text("Назад", fontSize = 12.sp)
                                 }
 
-                                Button(
-                                    onClick = {
-                                        val finalName = newZoneName.ifEmpty {
-                                            if (selectedCategory == ObjectCategory.ENTRANCE_BUILDING) "Подъезд • Этаж $selectedFloor" else "Дворовая территория"
-                                        }
-                                        onStartNewPerimeter(finalName, selectedCategory, selectedFloor)
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.weight(1.5f).height(42.dp)
-                                ) {
-                                    Icon(Icons.Default.DirectionsWalk, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Начать обход", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                if (creationMethod == 0) {
+                                    Button(
+                                        onClick = {
+                                            val w = customWidthM.toDoubleOrNull() ?: 6.0
+                                            val h = customHeightM.toDoubleOrNull() ?: 4.0
+                                            val finalName = newZoneName.ifEmpty {
+                                                if (selectedCategory == ObjectCategory.ENTRANCE_BUILDING) "Подъезд • эт. $selectedFloor (${w.toInt()}×${h.toInt()} м)" else "Двор (${w.toInt()}×${h.toInt()} м)"
+                                            }
+                                            onQuickCreateZone(finalName, selectedCategory, selectedFloor, w, h)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1.6f).height(42.dp)
+                                    ) {
+                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Создать объект", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            val finalName = newZoneName.ifEmpty {
+                                                if (selectedCategory == ObjectCategory.ENTRANCE_BUILDING) "Подъезд • Этаж $selectedFloor" else "Дворовая территория"
+                                            }
+                                            onStartNewPerimeter(finalName, selectedCategory, selectedFloor)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1.6f).height(42.dp)
+                                    ) {
+                                        Icon(Icons.Default.DirectionsWalk, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Начать обход", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
                         }

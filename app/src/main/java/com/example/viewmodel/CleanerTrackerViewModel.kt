@@ -86,6 +86,10 @@ class CleanerTrackerViewModel(application: Application) : AndroidViewModel(appli
         trackingManager.updateCleaningWidth(widthMeters)
     }
 
+    fun createQuickZone(name: String, category: ObjectCategory, floor: Int, widthMeters: Double, heightMeters: Double) {
+        trackingManager.createQuickZone(name, category, floor, widthMeters, heightMeters)
+    }
+
     fun startPerimeterMapping(name: String, category: ObjectCategory, floor: Int) {
         trackingManager.startPerimeterMapping(name, category, floor)
     }
